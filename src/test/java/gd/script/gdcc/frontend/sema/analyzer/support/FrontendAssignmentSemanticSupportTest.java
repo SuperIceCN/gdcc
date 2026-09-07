@@ -341,6 +341,53 @@ class FrontendAssignmentSemanticSupportTest {
     }
 
     @Test
+    void resolveAssignmentExpressionTypeSupportsStringFormatCompoundAssignment() throws Exception {
+        var analyzed = analyze(
+                "assignment_semantic_support_string_format_compound.gd",
+                """
+                        class_name AssignmentSemanticSupportStringFormatCompound
+                        extends RefCounted
+                        
+                        var label: String = "hp=%s"
+                        var hp: int = 0
+                        
+                        func ping(args: Array):
+                            label %= args
+                            hp %= 2
+                        """
+        );
+
+        var support = createSupport(analyzed, ResolveRestriction.instanceContext(), false);
+        var publishedResolver = publishedExpressionResolver(analyzed);
+        var assignments = findNodes(findFunction(analyzed.ast(), "ping"), AssignmentExpression.class, _ -> true);
+
+        // `String % Array` resolves through metadata and the String -> String boundary is accepted.
+        // The array-literal right-operand form is covered by the lowering MODULE test instead.
+        // Success outcomes of member-target assignments are owned by the writeback sub-route, so
+        // only the status/published-type contract is asserted (matching the convention above).
+        var stringFormatResult = FrontendAssignmentSemanticSupport.resolveAssignmentExpressionType(
+                support,
+                assignments.get(0),
+                FrontendAssignmentSemanticSupport.AssignmentUsage.STATEMENT_ROOT,
+                publishedResolver,
+                false
+        );
+        assertEquals(FrontendExpressionTypeStatus.RESOLVED, stringFormatResult.expressionType().status());
+        assertEquals(GdVoidType.VOID, stringFormatResult.expressionType().publishedType());
+
+        // Numeric modulo compound assignment keeps its existing behavior.
+        var numericResult = FrontendAssignmentSemanticSupport.resolveAssignmentExpressionType(
+                support,
+                assignments.get(1),
+                FrontendAssignmentSemanticSupport.AssignmentUsage.STATEMENT_ROOT,
+                publishedResolver,
+                false
+        );
+        assertEquals(FrontendExpressionTypeStatus.RESOLVED, numericResult.expressionType().status());
+        assertEquals(GdVoidType.VOID, numericResult.expressionType().publishedType());
+    }
+
+    @Test
     void resolveAssignmentExpressionTypeKeepsUnknownCompoundOperatorsFailClosed() throws Exception {
         var analyzed = analyze(
                 "assignment_semantic_support_unknown_compound.gd",

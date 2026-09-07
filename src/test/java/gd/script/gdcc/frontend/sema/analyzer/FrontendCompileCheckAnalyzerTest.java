@@ -1773,6 +1773,53 @@ class FrontendCompileCheckAnalyzerTest {
     }
 
     @Test
+    void analyzeForCompileKeepsStringFormatVariantRightOperandWithoutCompileCheckDiagnostic() throws Exception {
+        var source = """
+                class_name CompileCheckStringFormatVariant
+                extends RefCounted
+                
+                func render(value: Variant) -> String:
+                    return "value=%s" % value
+                """;
+
+        var compiled = analyzeForCompile("compile_check_string_format_variant.gd", source);
+
+        // `String % Variant` publishes a resolved String fact, so neither the upstream resolution
+        // nor the compile-check scan has anything to report.
+        assertFalse(compiled.diagnostics().hasErrors(), () -> compiled.diagnostics().asList().toString());
+        assertTrue(
+                diagnosticsByCategory(compiled.diagnostics(), "sema.compile_check").isEmpty(),
+                () -> compiled.diagnostics().asList().toString()
+        );
+    }
+
+    @Test
+    void analyzeForCompileKeepsStringFormatNilFailureOnUpstreamErrorWithoutDuplicateCompileCheck() throws Exception {
+        var source = """
+                class_name CompileCheckStringFormatNil
+                extends RefCounted
+                
+                func render() -> String:
+                    return "value=%s" % null
+                """;
+
+        var compiled = analyzeForCompile("compile_check_string_format_nil.gd", source);
+
+        // The `String % null` failure is owned upstream by `sema.expression_resolution`; the
+        // compile-check scan must not wrap a second `sema.compile_check` on the same anchor.
+        assertTrue(compiled.diagnostics().hasErrors());
+        var expressionErrors = diagnosticsByCategory(compiled.diagnostics(), "sema.expression_resolution");
+        assertEquals(1, expressionErrors.size(), () -> compiled.diagnostics().asList().toString());
+        assertTrue(expressionErrors.getFirst().message().contains(
+                "Binary operator '%' is not defined for operand types 'String' and 'Nil'"
+        ));
+        assertTrue(
+                diagnosticsByCategory(compiled.diagnostics(), "sema.compile_check").isEmpty(),
+                () -> compiled.diagnostics().asList().toString()
+        );
+    }
+
+    @Test
     void analyzeForCompileKeepsNonNodeGetNodeFailureOnUpstreamErrorWithoutDuplicateCompileCheck() throws Exception {
         var source = """
                 class_name CompileCheckNonNodeGetNode

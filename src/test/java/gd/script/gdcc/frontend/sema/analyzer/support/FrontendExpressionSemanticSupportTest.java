@@ -32,13 +32,16 @@ import gd.script.gdcc.scope.ClassRegistry;
 import gd.script.gdcc.scope.ResolveRestriction;
 import gd.script.gdcc.scope.ScopeLookupStatus;
 import gd.script.gdcc.type.GdArrayType;
+import gd.script.gdcc.type.GdBoolType;
 import gd.script.gdcc.type.GdCallableType;
+import gd.script.gdcc.type.GdDictionaryType;
 import gd.script.gdcc.type.GdFloatType;
 import gd.script.gdcc.type.GdFloatVectorType;
 import gd.script.gdcc.type.GdIntType;
 import gd.script.gdcc.type.GdIntVectorType;
 import gd.script.gdcc.type.GdNilType;
 import gd.script.gdcc.type.GdObjectType;
+import gd.script.gdcc.type.GdPackedStringArrayType;
 import gd.script.gdcc.type.GdSignalType;
 import gd.script.gdcc.type.GdStringNameType;
 import gd.script.gdcc.type.GdStringType;
@@ -1283,6 +1286,166 @@ class FrontendExpressionSemanticSupportTest {
         assertTrue(logicalOrResult.rootOwnsOutcome());
         assertEquals(FrontendExpressionTypeStatus.RESOLVED, logicalOrResult.expressionType().status());
         assertEquals("bool", logicalOrResult.expressionType().publishedType().getTypeName());
+    }
+
+    @Test
+    void resolveBinaryExpressionTypeStringFormatPublishesStringForRuntimeOpenRightOperand() throws Exception {
+        var support = newBareSupport();
+
+        // Happy path: a typed Variant right operand keeps static String precision.
+        var variantRightResult = support.resolveBinaryExpressionType(
+                new BinaryExpression("%", identifier("fmt"), identifier("payload"), TINY),
+                (expression, finalizeWindow) -> expression instanceof IdentifierExpression identifier
+                        && identifier.name().equals("fmt")
+                        ? FrontendExpressionType.resolved(GdStringType.STRING)
+                        : FrontendExpressionType.resolved(GdVariantType.VARIANT),
+                false
+        );
+        assertTrue(variantRightResult.rootOwnsOutcome());
+        assertEquals(FrontendExpressionTypeStatus.RESOLVED, variantRightResult.expressionType().status());
+        assertEquals(GdStringType.STRING, variantRightResult.expressionType().publishedType());
+
+        // Happy path: an untyped (dynamic) right operand keeps static String precision.
+        var dynamicRightResult = support.resolveBinaryExpressionType(
+                new BinaryExpression("%", identifier("fmt"), identifier("payload"), TINY),
+                (expression, finalizeWindow) -> expression instanceof IdentifierExpression identifier
+                        && identifier.name().equals("fmt")
+                        ? FrontendExpressionType.resolved(GdStringType.STRING)
+                        : FrontendExpressionType.dynamic("synthetic runtime-open payload"),
+                false
+        );
+        assertTrue(dynamicRightResult.rootOwnsOutcome());
+        assertEquals(FrontendExpressionTypeStatus.RESOLVED, dynamicRightResult.expressionType().status());
+        assertEquals(GdStringType.STRING, dynamicRightResult.expressionType().publishedType());
+    }
+
+    @Test
+    void resolveBinaryExpressionTypeStringFormatKeepsBoundariesAndInvariants() throws Exception {
+        var support = newBareSupport();
+
+        // Invariant: exact static right operands still resolve through metadata unchanged.
+        var exactIntResult = support.resolveBinaryExpressionType(
+                new BinaryExpression("%", identifier("fmt"), identifier("value"), TINY),
+                (expression, finalizeWindow) -> expression instanceof IdentifierExpression identifier
+                        && identifier.name().equals("fmt")
+                        ? FrontendExpressionType.resolved(GdStringType.STRING)
+                        : FrontendExpressionType.resolved(GdIntType.INT),
+                false
+        );
+        assertTrue(exactIntResult.rootOwnsOutcome());
+        assertEquals(FrontendExpressionTypeStatus.RESOLVED, exactIntResult.expressionType().status());
+        assertEquals(GdStringType.STRING, exactIntResult.expressionType().publishedType());
+
+        // Negative: a named object subclass right operand stays fail-closed (exact-name matching
+        // has no entry for "Node"), and the FAILED detail wording stays unchanged.
+        var nodeRightResult = support.resolveBinaryExpressionType(
+                new BinaryExpression("%", identifier("fmt"), identifier("node"), TINY),
+                (expression, finalizeWindow) -> expression instanceof IdentifierExpression identifier
+                        && identifier.name().equals("fmt")
+                        ? FrontendExpressionType.resolved(GdStringType.STRING)
+                        : FrontendExpressionType.resolved(new GdObjectType("Node")),
+                false
+        );
+        assertTrue(nodeRightResult.rootOwnsOutcome());
+        assertEquals(FrontendExpressionTypeStatus.FAILED, nodeRightResult.expressionType().status());
+        assertTrue(nodeRightResult.expressionType().detailReason().contains(
+                "Binary operator '%' is not defined for operand types 'String' and 'Node'"
+        ));
+
+        // Negative: a `null` right operand stays fail-closed and reports the Nil type name.
+        var nilRightResult = support.resolveBinaryExpressionType(
+                new BinaryExpression("%", identifier("fmt"), identifier("payload"), TINY),
+                (expression, finalizeWindow) -> expression instanceof IdentifierExpression identifier
+                        && identifier.name().equals("fmt")
+                        ? FrontendExpressionType.resolved(GdStringType.STRING)
+                        : FrontendExpressionType.resolved(GdNilType.NIL),
+                false
+        );
+        assertTrue(nilRightResult.rootOwnsOutcome());
+        assertEquals(FrontendExpressionTypeStatus.FAILED, nilRightResult.expressionType().status());
+        assertTrue(nilRightResult.expressionType().detailReason().contains(
+                "Binary operator '%' is not defined for operand types 'String' and 'Nil'"
+        ));
+
+        // Negative: MODULE with a non-String left operand is unchanged numeric-modulo semantics.
+        var intLeftResult = support.resolveBinaryExpressionType(
+                new BinaryExpression("%", identifier("value"), identifier("fmt"), TINY),
+                (expression, finalizeWindow) -> expression instanceof IdentifierExpression identifier
+                        && identifier.name().equals("fmt")
+                        ? FrontendExpressionType.resolved(GdStringType.STRING)
+                        : FrontendExpressionType.resolved(GdIntType.INT),
+                false
+        );
+        assertTrue(intLeftResult.rootOwnsOutcome());
+        assertEquals(FrontendExpressionTypeStatus.FAILED, intLeftResult.expressionType().status());
+        assertTrue(intLeftResult.expressionType().detailReason().contains(
+                "Binary operator '%' is not defined for operand types 'int' and 'String'"
+        ));
+
+        // Invariant: a runtime-open left operand still routes through Variant semantics.
+        var variantLeftResult = support.resolveBinaryExpressionType(
+                new BinaryExpression("%", identifier("payload"), identifier("value"), TINY),
+                (expression, finalizeWindow) -> expression instanceof IdentifierExpression identifier
+                        && identifier.name().equals("payload")
+                        ? FrontendExpressionType.resolved(GdVariantType.VARIANT)
+                        : FrontendExpressionType.resolved(GdIntType.INT),
+                false
+        );
+        assertTrue(variantLeftResult.rootOwnsOutcome());
+        assertEquals(FrontendExpressionTypeStatus.DYNAMIC, variantLeftResult.expressionType().status());
+        assertEquals(GdVariantType.VARIANT, variantLeftResult.expressionType().publishedType());
+
+        // Invariant: a StringName left operand is out of scope for the String-format rule.
+        var stringNameLeftResult = support.resolveBinaryExpressionType(
+                new BinaryExpression("%", identifier("fmt"), identifier("payload"), TINY),
+                (expression, finalizeWindow) -> expression instanceof IdentifierExpression identifier
+                        && identifier.name().equals("fmt")
+                        ? FrontendExpressionType.resolved(GdStringNameType.STRING_NAME)
+                        : FrontendExpressionType.resolved(GdVariantType.VARIANT),
+                false
+        );
+        assertTrue(stringNameLeftResult.rootOwnsOutcome());
+        assertEquals(FrontendExpressionTypeStatus.DYNAMIC, stringNameLeftResult.expressionType().status());
+        assertEquals(GdVariantType.VARIANT, stringNameLeftResult.expressionType().publishedType());
+    }
+
+    @Test
+    void resolveBinaryExpressionTypeStringFormatResolvesMetadataOperandMatrix() throws Exception {
+        var support = newBareSupport();
+
+        // Representative sample of the `String % T -> String` metadata matrix, including the
+        // container normalization entries (Array[T] -> "Array", Dictionary[K,V] -> "Dictionary")
+        // and the exact-name "Object" entry. The full matrix is inherited from the Godot
+        // evaluator and is not enumerated exhaustively here.
+        var sampledRightTypes = List.<GdType>of(
+                GdIntType.INT,
+                GdFloatType.FLOAT,
+                GdBoolType.BOOL,
+                GdStringType.STRING,
+                new GdArrayType(GdVariantType.VARIANT),
+                new GdArrayType(GdIntType.INT),
+                new GdDictionaryType(GdVariantType.VARIANT, GdVariantType.VARIANT),
+                new GdDictionaryType(GdStringType.STRING, GdIntType.INT),
+                GdPackedStringArrayType.PACKED_STRING_ARRAY,
+                GdObjectType.OBJECT
+        );
+        for (var rightType : sampledRightTypes) {
+            var result = support.resolveBinaryExpressionType(
+                    new BinaryExpression("%", identifier("fmt"), identifier("payload"), TINY),
+                    (expression, finalizeWindow) -> expression instanceof IdentifierExpression identifier
+                            && identifier.name().equals("fmt")
+                            ? FrontendExpressionType.resolved(GdStringType.STRING)
+                            : FrontendExpressionType.resolved(rightType),
+                    false
+            );
+            assertTrue(result.rootOwnsOutcome(), rightType.getTypeName());
+            assertEquals(
+                    FrontendExpressionTypeStatus.RESOLVED,
+                    result.expressionType().status(),
+                    rightType.getTypeName()
+            );
+            assertEquals(GdStringType.STRING, result.expressionType().publishedType(), rightType.getTypeName());
+        }
     }
 
     @Test

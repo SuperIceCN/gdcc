@@ -1764,6 +1764,60 @@ class FrontendBodyOwnerProceduresExprTypeTest {
     }
 
     @Test
+    void analyzePublishesStringFormatTypesAndRecoversFromUnsupportedRightOperand() throws Exception {
+        var analyzed = analyze(
+                "expr_type_string_format_recovery.gd",
+                """
+                        class_name ExprTypeStringFormatRecovery
+                        extends RefCounted
+                        
+                        class Point:
+                            var x: int = 0
+                        
+                        func ping(typed_variant: Variant):
+                            var ok: String = "value=%s" % "a"
+                            var bad = "value=%s" % Point.new()
+                            var after: String = "value=%d" % 1
+                            var variant_ok: String = "value=%s" % typed_variant
+                        """
+        );
+
+        var statements = findFunction(analyzed.ast(), "ping").body().statements();
+
+        // Happy path: exact metadata right operands publish String.
+        var ok = analyzed.analysisData().expressionTypes().get(findVariable(statements, "ok").value());
+        assertEquals(FrontendExpressionTypeStatus.RESOLVED, ok.status());
+        assertEquals("String", ok.publishedType().getTypeName());
+
+        // Negative: a script-class right operand is fail-closed; only the bad subtree fails.
+        var bad = analyzed.analysisData().expressionTypes().get(findVariable(statements, "bad").value());
+        assertEquals(FrontendExpressionTypeStatus.FAILED, bad.status());
+
+        // The module keeps working after the bad subtree: later legal expressions stay resolved.
+        var after = analyzed.analysisData().expressionTypes().get(findVariable(statements, "after").value());
+        assertEquals(FrontendExpressionTypeStatus.RESOLVED, after.status());
+        assertEquals("String", after.publishedType().getTypeName());
+
+        // A runtime-open (Variant) right operand keeps static String precision.
+        var variantOk = analyzed.analysisData().expressionTypes().get(findVariable(statements, "variant_ok").value());
+        assertEquals(FrontendExpressionTypeStatus.RESOLVED, variantOk.status());
+        assertEquals("String", variantOk.publishedType().getTypeName());
+
+        // Exactly one root-owned sema.expression_resolution for the bad subtree; the script-class
+        // type name rendering is intentionally not frozen beyond the `Point` marker.
+        var expressionDiagnostics = diagnosticsByCategory(analyzed, "sema.expression_resolution");
+        assertEquals(1, expressionDiagnostics.size());
+        assertTrue(expressionDiagnostics.getFirst().message().contains(
+                "Binary operator '%' is not defined for operand types 'String' and '"
+        ));
+        assertTrue(expressionDiagnostics.getFirst().message().contains("Point"));
+
+        assertTrue(diagnosticsByCategory(analyzed, "sema.unsupported_expression_route").isEmpty());
+        assertTrue(diagnosticsByCategory(analyzed, "sema.deferred_expression_resolution").isEmpty());
+        assertTrue(diagnosticsByCategory(analyzed, "sema.discarded_expression").isEmpty());
+    }
+
+    @Test
     void analyzePublishesResolvedVoidForStatementAssignmentsWithoutDiscardedWarnings() throws Exception {
         var analyzed = analyze(
                 "expr_type_assignment_success.gd",

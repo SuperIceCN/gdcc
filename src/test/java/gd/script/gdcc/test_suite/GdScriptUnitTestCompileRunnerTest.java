@@ -206,6 +206,14 @@ public class GdScriptUnitTestCompileRunnerTest {
             "smoke/not_in_membership.gd",
             "smoke/object_identity_equality.gd",
             "smoke/object_nil_equality.gd",
+            "string_format/array_multi_placeholder.gd",
+            "string_format/compound_assignment.gd",
+            "string_format/numeric_family.gd",
+            "string_format/percent_escape.gd",
+            "string_format/runtime_error_arg_count.gd",
+            "string_format/single_value.gd",
+            "string_format/typed_array_operand.gd",
+            "string_format/variant_operand.gd",
             "subscript/array_roundtrip.gd",
             "subscript/dictionary_float_key_roundtrip.gd",
             "subscript/packed_array_mutation_roundtrip.gd",
@@ -241,6 +249,7 @@ public class GdScriptUnitTestCompileRunnerTest {
     private static final List<String> RUNTIME_SCRIPT_PATHS = scriptPathsWithPrefix("runtime/");
     private static final List<String> SCENE_SCRIPT_PATHS = scriptPathsWithPrefix("scene/");
     private static final List<String> SMOKE_SCRIPT_PATHS = scriptPathsWithPrefix("smoke/");
+    private static final List<String> STRING_FORMAT_SCRIPT_PATHS = scriptPathsWithPrefix("string_format/");
     private static final List<String> SUBSCRIPT_SCRIPT_PATHS = scriptPathsWithPrefix("subscript/");
     private static final List<String> TERNARY_SCRIPT_PATHS = scriptPathsWithPrefix("ternary/");
     private static final List<String> TYPE_TEST_SCRIPT_PATHS = scriptPathsWithPrefix("type_test/");
@@ -378,6 +387,14 @@ public class GdScriptUnitTestCompileRunnerTest {
         return compileAndValidateBundledUnitScripts(
                 SMOKE_SCRIPT_PATHS,
                 "Zig not found; skipping smoke GDScript compile-run tests"
+        );
+    }
+
+    @TestFactory
+    Stream<DynamicTest> compilesAndValidatesStringFormatScripts() throws Exception {
+        return compileAndValidateBundledUnitScripts(
+                STRING_FORMAT_SCRIPT_PATHS,
+                "Zig not found; skipping string_format GDScript compile-run tests"
         );
     }
 

@@ -5,7 +5,7 @@
 ## 文档状态
 
 - 状态：事实源维护中
-- 更新时间：2026-08-27
+- 更新时间：2026-09-07
 - 适用范围：
   - `src/main/java/gd/script/gdcc/frontend/sema/**`
   - `src/main/java/gd/script/gdcc/frontend/sema/analyzer/**`
@@ -133,6 +133,7 @@ frontend 当前将 unary / binary 语义冻结在 shared expression helper，而
   - `<<`、`>>`、`&`、`|`、`^`
   - `==`、`!=`、`<`、`<=`、`>`、`>=`
   - `in`
+- 其中 `%`（`MODULE`）是二义入口：数值取模与字符串格式化 `"fmt" % args` 共享同一运算符；字符串格式化的类型合同见 §4.7
 
 ### 2.3 fail-closed 边界
 
@@ -204,6 +205,7 @@ unary 当前有意保持保守精度：
    - `rootOwnsOutcome = false`
 3. 对 exact / stable child：
    - 先处理 source-level special rule（`and/or`、object/nil equality、object identity equality、typed array preserve）
+   - 再处理字符串格式化精度规则：`MODULE` + 左 `String` + 右 runtime-open 时发布 `RESOLVED(String)`（内联于 `resolveBinaryOperatorResultType(...)` 主函数，不进 `resolveBinarySpecialReturnType(...)`，见 §4.7）
    - 再处理 runtime-open：任一 operand 为 `DYNAMIC` 或 exact `Variant` 时，根节点保守发布 `DYNAMIC(Variant)`
    - 最后处理普通 builtin metadata exact lookup
 4. 普通 exact metadata 未命中
@@ -217,7 +219,7 @@ unary 当前有意保持保守精度：
 
 ### 4.2 当前 source-level special rule
 
-binary 当前有四类 source-level special rule，不得强行回退到 extension metadata：
+binary 当前有四类 source-level special rule（均位于 helper `resolveBinarySpecialReturnType(...)` 内），不得强行回退到 extension metadata。字符串格式化的 `MODULE` + 左 `String` + 右 runtime-open 精度规则（§4.7）内联在主函数中，不是第五条 helper 规则：
 
 1. `and/or`
    - 同时覆盖源码别名 `&&/||`
@@ -324,6 +326,17 @@ object identity equality 同样沿用这条 `BinaryOpInsn` 主路径，但不走
 - “`== null` 等价 object validity 检查”
 - “backend 既然更宽，frontend 当前也应一起放宽”
 
+### 4.7 字符串格式化 `%` 的 String 左操作数合同
+
+`%` 与数值取模共享 `MODULE` 运算符入口（与 Godot `Variant::OP_MODULE` 的重载模型一致，不新增枚举）。字符串格式化 = `MODULE` 在 `String` 左操作数上的 metadata 重载，外加一条 runtime-open 精度规则：
+
+- 静态右操作数走普通 metadata exact 匹配：`String % T -> String` 矩阵覆盖全部 builtin 类型；`Array[T]` / `Dictionary[K,V]` 归一化为 `Array` / `Dictionary`；精确名 `Object` 命中。具名 object 子类（如 `Node`、GDCC script class）与 `null` 右操作数 fail-closed（`sema.expression_resolution`）。
+- runtime-open 右操作数（exact `Variant` 或 `DYNAMIC`）在主函数 runtime-open 分支正前方内联命中，发布 `RESOLVED(String)`。依据是 Godot `do_mod` 对 String 左操作数与全部 metadata `return_type` 恒为 `String`。该规则故意不进 `resolveBinarySpecialReturnType(...)`：helper 保持 `(GodotOperator, GdType, GdType)` 纯类型签名。
+- 左操作数 runtime-open（如 `Variant % int`）仍走通用 runtime-open 路由发布 `DYNAMIC(Variant)`；`StringName` 左操作数当前不覆盖。
+- 格式化语义（占位符族、`%%` 转义、padding/精度修饰符、错误描述串）整体委托 Godot runtime evaluator，编译器不重实现；占位符与参数数量不匹配是运行时行为（sprintf 返回错误描述串），不是编译期错误。
+- `%=` 复合赋值与普通二元共用 `resolveBinaryOperatorResultType(...)`，自动继承本合同。
+- backend 不加特化：静态右操作数走 `BUILTIN_EVALUATOR` helper（typed array helper 名按 `getTypeName()` sanitize，ABI 上 `godot_TypedArray(T)` 即 `godot_Array`）；右 `Variant` 走 `VARIANT_EVALUATE` 并把结果 unpack 到 `String` slot。
+
 ---
 
 ## 5. Downstream 消费合同
@@ -370,6 +383,7 @@ compile gate 当前只把以下状态视为 blocker：
 - `RESOLVED` unary / binary 不再命中 generic compile blocker
 - `DYNAMIC` unary / binary 同样不再命中 generic compile blocker
 - `not in` 经 §4.4 复合规则发布 `RESOLVED(bool)`（非法配对为 `FAILED`），同样不再命中 generic compile blocker
+- 字符串格式化 `%` 对本 gate 零改动：支持面组合发布 `RESOLVED(String)` 不命中 blocker；fail-closed 组合（如 `String % null`）由 upstream `sema.expression_resolution` 阻断且不补 `sema.compile_check`
 - `ConditionalExpression` 已不再依赖显式 compile-only block：与 unary/binary 一样只依赖 published fact 是否 lowering-ready（见 `frontend_conditional_expression_implementation.md`）
 
 ---
@@ -394,28 +408,39 @@ compile gate 当前只把以下状态视为 blocker：
   - object/nil equality 正反例
   - object identity equality 正反例（同类、继承相关、继承无关、GDCC/engine 混合、ordering 拒绝、Variant/DYNAMIC 保持 runtime-open）
   - `not in` 复合规则正反例（typed / dynamic / Variant 恒 `RESOLVED(bool)`，非法配对 `FAILED` 且消息锚定 `'in'`）
+  - 字符串格式化 `%`（§4.7）：metadata 抽样矩阵（含容器归一化与精确名 `Object`）恒 `RESOLVED(String)`；runtime-open 右操作数 `RESOLVED(String)`；具名 object 子类 / `null`（`Nil`）/ `int % String` fail-closed 且文案不变；左 runtime-open 与 `StringName` 左操作数保持 `DYNAMIC(Variant)`
 - `FrontendBodyOwnerProcedures` / body expression resolver 路径
   - unary / binary 结果发布
   - root-owned 与 upstream-propagated 区分
+  - 字符串格式化恢复路径：script class 右操作数恰好一条 `sema.expression_resolution`，坏 subtree FAILED，同 module 前后合法格式化表达式仍 `RESOLVED(String)`
 - `FrontendTypeCheckAnalyzerTest`
   - unary / binary 稳定结果进入 condition / initializer / return 消费面
+  - 字符串格式化结果作为 condition 根 / initializer / return 的 String fact 消费，`String -> int` slot 拒绝恰好一条 `sema.type_check`
 - `FrontendCompileCheckAnalyzerTest`
   - unary / binary resolved / dynamic route 不再触发 compile blocker
   - object/nil equality 不再触发 compile blocker
   - object identity equality 不再触发 compile blocker
   - object/object ordering 继续被 `sema.expression_resolution` 阻断
   - `ConditionalExpression` 已放行：支持面三元零 compile_check，FAILED/UNSUPPORTED 三元经 upstream owner + exact-range 去重阻断
+  - 字符串格式化 `%`：`String % Variant` 零诊断；`String % null` 仅上游 `sema.expression_resolution`，不补 `sema.compile_check`
 - `FrontendLoweringBodyInsnPassTest`
   - object/nil equality 继续进入 ordinary `BinaryOpInsn` lowering 路由
   - object identity equality 进入 ordinary `BinaryOpInsn`，结果 `bool`，不经 `Pack/UnpackVariantInsn`
   - `not in` 复合 lowering：`BinaryOpInsn(IN, 固定 bool 中间槽) -> UnaryOpInsn(NOT)`，覆盖 typed / dynamic 操作数与 condition 语境分支极性
+  - 字符串格式化：字面量左 / 数组字面量右 lowering 为 `BinaryOpInsn(MODULE)`（String/Array slot 类型锚定，数组先 `construct_container_literal`）；`%=` lowering 为 `BinaryOpInsn(MODULE)` + 本地 store
+- `FrontendAssignmentSemanticSupportTest`
+  - `%=` 字符串格式化（`String %= Array`）与数值取模（`int %= int`）均 RESOLVED 且 writeback 边界通过
 - `COperatorInsnGenTest`
   - `Object/Nil`、`Nil/Object`、`Nil/Nil` 继续走 nil specialization codegen
   - `Object/Object`、`Node/Node`、GDCC/engine 混合 pair 继续走 equality-normalized raw codegen
+  - 字符串格式化三条 codegen 用例：`MODULE(String, Array)` / `MODULE(String, Array[int])` 走 `BUILTIN_EVALUATOR`（helper 名 sanitize + metadata 归一化命中），`MODULE(String, Variant)` 走 `VARIANT_EVALUATE` + String unpack type-check
+- `CCodegenTest`
+  - 字符串格式化 untyped / typed array 两个 helper spec 均被收集并渲染进 `entry.h`
 - `GdScriptUnitTestCompileRunnerTest`
   - `object_nil_equality` smoke 资源保持端到端可编译与结果对齐
   - `object_identity_equality` smoke 资源覆盖自反 `==`、不同实例 `!=`、`Node == Object`、`Signal.get_object() == node` 与 `null` 分支不误翻转
   - `not_in_membership` smoke（script + validation 孪生）覆盖 typed / dynamic 操作数、`Array` / `Dictionary` / `String` 容器、value / condition 语境及与 `not (a in b)` 的等价性
+  - `string_format/` 用例组覆盖单值、多占位符数组、数字族修饰符、`%%` 转义、typed array 右操作数、Variant 右操作数、`%=` 与 sprintf 参数不足的运行时错误描述串
 
 后续若扩张 unary / binary 行为，测试必须继续同时覆盖：
 
@@ -440,7 +465,7 @@ compile gate 当前只把以下状态视为 blocker：
 
 ### 7.2 dynamic 精度仍然保守
 
-除 `and/or -> bool` 外，当前 unary / binary 对 runtime-open operand 统一保守发布 `DYNAMIC(Variant)`。
+除 `and/or -> bool` 与 §4.7 的 `MODULE` + 左 `String` + 右 runtime-open → `RESOLVED(String)` 外，当前 unary / binary 对 runtime-open operand 统一保守发布 `DYNAMIC(Variant)`。
 
 这条边界的价值在于：
 

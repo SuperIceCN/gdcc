@@ -4,7 +4,7 @@
 
 ## 文档状态
 
-- 状态：计划已就绪，待实施
+- 状态：已实施完成（代码、测试、文档同步与全量回归均已完成）。§1/§2.2/§2.6 保留实施前调研快照；最终口径以 §2.7、`frontend_rules.md` 与 `frontend_unary_binary_expr_semantic_implementation.md` §4.7 为准
 - 最后更新：2026-09-07
 - 适用范围：
   - `src/main/java/gd/script/gdcc/frontend/sema/analyzer/support/FrontendExpressionSemanticSupport.java`
@@ -44,10 +44,10 @@ GDScript 中 `%` 是二义运算符：
 - 数值取模：`5 % 2 -> 1`、`5.5 % 2.0 -> 1.5`
 - 字符串格式化：`"We're waiting for %s." % "Godot"`、`"%s was reluctant to learn %s" % ["Estragon", "GDScript"]`
 
-`frontend_rules.md` 当前仍写着"字符串格式化 `%` 语法在 MVP 版本中不支持"（第 130 行），但调研发现 metadata-driven 的现有链路实际上已部分打通了该 feature：extension metadata 声明了 `String % <所有 builtin 类型> -> String`，frontend sema 与 backend codegen 对大多数静态右操作数已经能闭环。当前的真正缺口是：
+实施前 `frontend_rules.md` 曾写着"字符串格式化 `%` 语法在 MVP 版本中不支持"（第 130 行，阶段 F 已改写为 compile-ready 支持面），但调研发现 metadata-driven 的现有链路实际上已部分打通了该 feature：extension metadata 声明了 `String % <所有 builtin 类型> -> String`，frontend sema 与 backend codegen 对大多数静态右操作数已经能闭环。实施前的真正缺口是：
 
 1. 没有任何专门的单元测试 / e2e 测试锚定字符串 `%` 行为，正确性未被验证；
-2. `String % <runtime-open 操作数>`（`Variant` / dynamic）目前发布 `DYNAMIC(Variant)`，丢失了"结果必为 `String`"的静态精度；
+2. `String % <runtime-open 操作数>`（`Variant` / dynamic）当时发布 `DYNAMIC(Variant)`，丢失了"结果必为 `String`"的静态精度（已由 D2 关闭）；
 3. `frontend_rules.md` 的 MVP 声明与代码现状矛盾，需要按实际支持面改写；
 4. 少数右操作数形态（具名 object 子类、`null` 字面量）尚无明确的支持/拒绝合同。
 
@@ -59,7 +59,7 @@ GDScript 中 `%` 是二义运算符：
 - `GodotOperator`（`src/main/java/gd/script/gdcc/enums/GodotOperator.java:88-110`）把源码 `%` 规范化为 `MODULE`；metadata 侧同样 `"%" -> MODULE`（`:54-65`）。不存在独立的 FORMAT 运算符，这与 Godot 一致：Godot 把字符串格式化建模为 `Variant::OP_MODULE` 在 `String` 左操作数上的重载。
 - 运算符优先级由外部 grammar 决定（`%` 与 `*` `/` 同级，见 Godot `core/math/expression.cpp`），frontend 不维护优先级表。
 
-### 2.2 前端语义现状
+### 2.2 前端语义（实施前快照）
 
 入口：`FrontendExpressionSemanticSupport.resolveBinaryOperatorResultType(...)`
 （`src/main/java/gd/script/gdcc/frontend/sema/analyzer/support/FrontendExpressionSemanticSupport.java:682-743`），固定顺序为：
@@ -72,14 +72,14 @@ GDScript 中 `%` 是二义运算符：
 
 extension metadata（`src/main/resources/extension_api_451.json`，String builtin class 的 `operators`）声明了完整的 `String % T -> String` 矩阵，包括 `Variant/bool/int/float/String/StringName/NodePath/RID/Object/Callable/Signal/Dictionary/Array`、全部 Vector/Transform/Color/Plane/Quaternion/AABB/Basis/Projection 与全部 Packed*Array；**不包含 `Nil`，也不包含任何具名 object 子类或 script class**。
 
-由此得出当前实际行为（已逐行核实）：
+由此得出实施前的实际行为（已逐行核实；`String % Variant/dynamic` 行已被 D2 改变，见 §2.7 与 unary/binary §4.7）：
 
-| 源码形态 | 当前结果 |
+| 源码形态 | 实施前结果 |
 |---|---|
 | `String % int/float/bool/String/Array/Dictionary/Packed*Array/...`（metadata 精确命中） | `RESOLVED(String)` |
 | `String % Array[T]`（typed array，归一化为 `Array`） | `RESOLVED(String)` |
 | `String % Object`（精确类型名 `"Object"` 命中 metadata） | `RESOLVED(String)` |
-| `String % Variant` / `String % <dynamic>` | `DYNAMIC(Variant)`（runtime-open 分支先于 metadata） |
+| `String % Variant` / `String % <dynamic>` | 实施前 `DYNAMIC(Variant)`（runtime-open 分支先于 metadata）；D2 实施后 `RESOLVED(String)` |
 | `String % <具名 object 子类>`（如 `Node`、GDCC script class，类型名 `"Node"`/`"Foo"` 无 metadata 条目） | `FAILED` |
 | `String % null`（`null` 字面量发布 `GdNilType`，类型名为 `Nil`，无 metadata 条目） | `FAILED` |
 | 上述 `FAILED` 的诊断形态 | `Binary operator '%' is not defined for operand types 'String' and 'X'`（`X` 为发布的类型名，如 `Nil`），category `sema.expression_resolution`，由 `FrontendBodyOwnerProcedures` 以 root-owned 发布 |
@@ -116,10 +116,10 @@ Godot 上游实现：`core/variant/variant_op.h` 中 `do_mod(const String&, ...)
 
 | # | 差距 | 性质 |
 |---|---|---|
-| G1 | 无字符串 `%` 的 frontend sema / lowering / backend / e2e 测试 | 测试缺口 |
-| G2 | `String % <runtime-open>` 发布 `DYNAMIC(Variant)`，丢失静态 `String` 精度，导致下游 assignment 多走一次 Variant unpack，且 `analyze(...)` 观察到的类型过宽 | 精度缺口 |
-| G3 | `frontend_rules.md:130` 与代码现状矛盾 | 文档缺口 |
-| G4 | `String % <具名 object 子类>`（如 `Node`、GDCC script class）与 `String % null` 无明确合同（当前恰好 fail-closed，但从未被声明或测试锚定） | 合同缺口 |
+| G1 | 无字符串 `%` 的 frontend sema / lowering / backend / e2e 测试 | 测试缺口（已由阶段 C/D/E 关闭） |
+| G2 | `String % <runtime-open>` 发布 `DYNAMIC(Variant)`，丢失静态 `String` 精度，导致下游 assignment 多走一次 Variant unpack，且 `analyze(...)` 观察到的类型过宽 | 精度缺口（已由 D2 关闭） |
+| G3 | `frontend_rules.md:130` 与代码现状矛盾 | 文档缺口（已由阶段 F 关闭） |
+| G4 | `String % <具名 object 子类>`（如 `Node`、GDCC script class）与 `String % null` 无明确合同（当前恰好 fail-closed，但从未被声明或测试锚定） | 合同缺口（已由 D3 关闭：fail-closed 固化为明确合同并补测试锚定） |
 
 ### 2.7 设计决策
 
@@ -290,11 +290,11 @@ Godot 上游实现：`core/variant/variant_op.h` 中 `do_mod(const String&, ...)
 ## 5. 任务状态
 
 - [x] 任务 1：完成调研与实施计划文档（阶段 A）。
-- [ ] 任务 2：实现 sema 精度规则（阶段 B，只改代码与单测）。
-- [ ] 任务 3：补齐 frontend sema/type-check/compile-check/lowering 单测，含 `%=` 与恢复路径 fixture（阶段 C）。
-- [ ] 任务 4：补齐 backend codegen 回归测试（阶段 D）。
-- [ ] 任务 5：新增 e2e test_suite 用例，更新 `EXPECTED_SCRIPT_PATHS` 并接入 `STRING_FORMAT_SCRIPT_PATHS` + `@TestFactory`（阶段 E）。
-- [ ] 任务 6：同步 `frontend_rules.md` 与 unary/binary 事实源并全量回归（阶段 F）。
+- [x] 任务 2：实现 sema 精度规则（阶段 B，只改代码与单测）。
+- [x] 任务 3：补齐 frontend sema/type-check/compile-check/lowering 单测，含 `%=` 与恢复路径 fixture（阶段 C）。
+- [x] 任务 4：补齐 backend codegen 回归测试（阶段 D）。
+- [x] 任务 5：新增 e2e test_suite 用例，更新 `EXPECTED_SCRIPT_PATHS` 并接入 `STRING_FORMAT_SCRIPT_PATHS` + `@TestFactory`（阶段 E）。
+- [x] 任务 6：同步 `frontend_rules.md` 与 unary/binary 事实源并全量回归（阶段 F）。
 
 ## 6. Post-MVP Backlog
 
@@ -312,3 +312,9 @@ Godot 上游实现：`core/variant/variant_op.h` 中 `do_mod(const String&, ...)
   - 已形成设计决策 D1-D5 与分阶段计划。
   - 经两轮独立审阅后修订：拆分 G4 为三档合同（`Object` 精确名命中保持支持；具名 object 子类与 `null` fail-closed）；D2 定为 runtime-open 分支正前方内联、不扩 helper 签名；`StringName` 左操作数移入 Post-MVP；验收准则 1 改为可判定的抽样+委托口径；补充恢复路径 fixture、compile-check 回归、typed array codegen 锚点与 e2e 用例约定；统一文档同步职责到阶段 F。
   - 第二轮复核后修订：阶段 F 的 unary/binary 同步目标细化为 §4.1 求值顺序 + §4.2 引言改写或另开独立小节 + §7.2 例外（D2 不写成第五条 helper 规则）；chain-binding 旁注措辞修正；阶段 E 补 `STRING_FORMAT_SCRIPT_PATHS` + `@TestFactory` 接入要求，runtime-error 用例改为 `output_contains`/`output_contains_any` + `output_not_contains` 断言口径；阶段 C 与验收准则 1 的 Dictionary/PackedStringArray 抽样对齐；阶段 D 目标句改为两路径三用例。
+  - 阶段 B 已实施：`resolveBinaryOperatorResultType(...)` 的 runtime-open 分支正前方内联 `MODULE` + 左 `GdStringType` + 右 runtime-open → `RESOLVED(String)`；`FrontendExpressionSemanticSupportTest` 新增 `resolveBinaryExpressionTypeStringFormatPublishesStringForRuntimeOpenRightOperand`（Variant/dynamic 右操作数 happy path）与 `resolveBinaryExpressionTypeStringFormatKeepsBoundariesAndInvariants`（exact int 不变、`Node`/`Nil`/`int % String` fail-closed 且诊断文案不变、`Variant % int` 与 `StringName % Variant` 仍 DYNAMIC）；定向测试与全类回归通过。阶段 B 经 review-expert-a 审阅 APPROVE，唯一低优先级问题（测试注释提到本层未断言的 category）已修正注释措辞。
+  - 阶段 C 已实施：`FrontendExpressionSemanticSupportTest.resolveBinaryExpressionTypeStringFormatResolvesMetadataOperandMatrix` 锚定抽样矩阵（int/float/bool/String/Array/Array[int]/Dictionary/Dictionary[String,int]/PackedStringArray/Object → String）；`FrontendBodyOwnerProceduresExprTypeTest.analyzePublishesStringFormatTypesAndRecoversFromUnsupportedRightOperand` 锚定恢复路径（script class 右操作数恰好一条 `sema.expression_resolution`、坏 subtree FAILED、前后合法表达式仍 RESOLVED、Variant 右操作数 RESOLVED String）；`FrontendAssignmentSemanticSupportTest.resolveAssignmentExpressionTypeSupportsStringFormatCompoundAssignment` 锚定 `label %= args`（String）与 `hp %= 2`（int）均 RESOLVED+VOID——实施中发现 member-target 成功的 outcome 由 writeback 子路由 own（status=RESOLVED 但 rootOwnsOutcome=false），与既有 compound 测试惯例一致，故成功路径不断言 rootOwnsOutcome；`FrontendTypeCheckAnalyzerTest.analyzeConsumesStringFormatTypedFactsAcrossInitializerConditionAndReturn` 锚定 initializer/condition/return 消费（合法函数零诊断 + `var wrong: int = "%s" % value` 恰好一条 `sema.type_check`）；`FrontendCompileCheckAnalyzerTest` 新增两条回归（Variant 右操作数零诊断、`String % null` 仅上游 `sema.expression_resolution` 不补 compile_check）；`FrontendLoweringBodyInsnPassTest` 新增 `runLowersStringFormatBinaryIntoModuleInsnAfterContainerConstruction`（container 建组 → MODULE → return 链路）与 `runLowersStringFormatCompoundAssignmentOnLocalIntoModuleAndAssign`（`%=` → MODULE + AssignInsn）。6 个测试类全量回归通过。
+  - 阶段 C 经 review-expert-a 审阅后修订：type-check fixture 改为 `if "%s" % value:` 使 `%` 成为 condition 根并断言其 RESOLVED(String) fact；lowering 测试补 `LiteralStringInsn` 左操作数链路与 left/right/result slot 类型断言（String/Array/String）；恢复路径诊断补 `contains("Point")` 提高判别力；复核 APPROVE 无残留问题。
+  - 阶段 D 已实施：`COperatorInsnGenTest` 新增 `moduleStringArrayUsesBuiltinEvaluator`（untyped → `gdcc_eval_binary_module_string_array_to_string`）、`moduleStringTypedArrayKeepsSanitizedHelperName`（typed → `..._array_int_...`，metadata 归一化命中 plain Array）、`moduleStringVariantUsesVariantEvaluateWithUnpackTypeCheck`（VARIANT_EVALUATE + String unpack type-check），配套 `stringFormatApi()` fixture；`CCodegenTest.rendersStringFormatEvaluatorHelpersForUntypedAndTypedArrayRightOperands` 锚定两个 helper spec 的收集与 entry.h 渲染。`COperatorInsnGenTest`/`CCodegenTest`/`GodotOperatorTest` 全量回归通过，MODULE primitive fast path 与除零 guard 用例不回归。阶段 D 经 review-expert-a 审阅 APPROVE，无高/中/低问题。
+  - 阶段 E 已实施：新增 8 对 `string_format/` e2e 用例（`single_value`、`array_multi_placeholder`、`numeric_family`、`percent_escape`、`typed_array_operand`、`variant_operand`、`compound_assignment`、`runtime_error_arg_count`）；已核对 Godot 4.5 `OperatorEvaluatorStringFormat.do_mod` 源码——sprintf 参数不足时**返回错误描述串**（`"not enough arguments for format string"`）且执行继续，故 runtime-error 用例采用"pass marker 前置 + `output_contains` 锚定错误文本 + `output_not_contains` 锚定 validation 失败路径"结构；`GdScriptUnitTestCompileRunnerTest` 已加 8 条 `EXPECTED_SCRIPT_PATHS`、`STRING_FORMAT_SCRIPT_PATHS` 常量与 `compilesAndValidatesStringFormatScripts` `@TestFactory`。本机 zig+Godot 环境下 `GdScriptUnitTestCompileRunnerTest` 全量通过（含真实编译运行，约 4 分钟）。validation 侧遵循现有 if/push_error 惯例做语义相等断言（仓库无 assert 用例）。阶段 E 经 review-expert-a 审阅 APPROVE；其低风险建议（runtime-error 用例 marker 后置以同时锚定"执行继续"）已采纳并复跑全量 e2e 通过。
+  - 阶段 F 已实施：`frontend_rules.md` 的 MVP"不支持"声明替换为支持面摘要（含 D3 边界）；`frontend_unary_binary_expr_semantic_implementation.md` 同步 §2.2 二义入口注记、§4.1 求值顺序插入 D2 步骤、§4.2 引言改写（明确非第五条 helper 规则）、新增 §4.7 合同小节、§5.3 compile gate 零改动条目、§6 各层测试锚点、§7.2 例外；只读参考清单文档零改动。`./gradlew clean build --no-daemon --info --console=plain` 全量回归通过（约 6 分钟，含 e2e）。阶段 F 经 review-expert-a 审阅：事实源正文无误；计划文档自身收尾（状态/任务 6/日志）与 §1/§2.2/§2.6 实施前快照标注已按审阅意见补齐；unary/binary 文档头日期同步更新。
