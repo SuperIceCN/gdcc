@@ -1395,7 +1395,7 @@ class FrontendExpressionSemanticSupportTest {
         assertEquals(FrontendExpressionTypeStatus.DYNAMIC, variantLeftResult.expressionType().status());
         assertEquals(GdVariantType.VARIANT, variantLeftResult.expressionType().publishedType());
 
-        // Invariant: a StringName left operand is out of scope for the String-format rule.
+        // Invariant: a StringName left operand does not use the String-format precision rule.
         var stringNameLeftResult = support.resolveBinaryExpressionType(
                 new BinaryExpression("%", identifier("fmt"), identifier("payload"), TINY),
                 (expression, finalizeWindow) -> expression instanceof IdentifierExpression identifier

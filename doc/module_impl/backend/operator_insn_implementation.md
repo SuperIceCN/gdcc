@@ -4,7 +4,7 @@
 
 - 状态：`Active`
 - 文档类型：`规范 / 事实源`
-- 更新时间：`2026-08-27`
+- 更新时间：`2026-09-07`
 - 适用范围：`backend.c` 中 `UNARY_OP`、`BINARY_OP` 的 C 代码生成与校验
 - 说明：本文件描述“已落地语义与约束”。如与历史文档或旧实现描述冲突，以本文件为准。
 
@@ -38,15 +38,16 @@
 1. `swap/dual` 回退暂不支持（`unary_op` 与 `binary_op` 均不支持）。
 2. `binary_op` metadata 仅按原顺序 `(leftType, op, rightType)` 匹配；不做隐式交换，不做对偶操作符替换。
 3. `binary_op` 只要任一操作数为 `Variant`，统一走 `godot_variant_evaluate`。
-4. `unary_op` 不走 `godot_variant_evaluate`，保持 metadata + builtin evaluator 路径。
-5. `IN` 仅允许原顺序解析（`left IN right`），不支持任何交换/对偶补救。
-6. `variant_evaluate` 的语义结果类型仍固定为 `Variant`，但 `result` 可为非 `Variant`：在运行时通过类型检查后自动 `unpack` 到目标类型。
-7. `Variant -> Variant` 回写必须走构造拷贝（`godot_new_Variant_with_Variant` + `callAssign`），禁止“浅拷贝赋值 + 临时变量销毁”模式。
-8. primitive 快路径统一发射 guard：
+4. `MODULE` 同时承载数值取模与 `String % args` 格式化。backend 不加格式化专用路径：静态右操作数走 `BUILTIN_EVALUATOR`（typed Array 仍归一化为 plain `Array`），右 `Variant` 走 `VARIANT_EVALUATE` 后 unpack 到 `String`。长合同见 `frontend_string_format_operator_implementation.md`。
+5. `unary_op` 不走 `godot_variant_evaluate`，保持 metadata + builtin evaluator 路径。
+6. `IN` 仅允许原顺序解析（`left IN right`），不支持任何交换/对偶补救。
+7. `variant_evaluate` 的语义结果类型仍固定为 `Variant`，但 `result` 可为非 `Variant`：在运行时通过类型检查后自动 `unpack` 到目标类型。
+8. `Variant -> Variant` 回写必须走构造拷贝（`godot_new_Variant_with_Variant` + `callAssign`），禁止“浅拷贝赋值 + 临时变量销毁”模式。
+9. primitive 快路径统一发射 guard：
    - `ADD/SUBTRACT/MULTIPLY` 不做整型溢出 guard（使用 NOOP guard 占位）。
    - `DIVIDE/MODULE`：整型检查除数 `0`；浮点检查除数 `0.0`。
    - `SHIFT_LEFT/SHIFT_RIGHT` 检查移位量非法；`SHIFT_LEFT` 额外拒绝负左操作数（避免 C UB）。
-9. `pow_int` 已修复负指数死循环：负指数下按 `base=1/-1/other` 返回 `1/-1(or1)/0`；正指数使用快速幂，保留 `__int128` 中间计算以提升截断前精度。
+10. `pow_int` 已修复负指数死循环：负指数下按 `base=1/-1/other` 返回 `1/-1(or1)/0`；正指数使用快速幂，保留 `__int128` 中间计算以提升截断前精度。
 
 ---
 

@@ -23,6 +23,8 @@
   - `src/test/test_suite/unit_test/validation/smoke/object_identity_equality.gd`
   - `src/test/test_suite/unit_test/script/smoke/not_in_membership.gd`
   - `src/test/test_suite/unit_test/validation/smoke/not_in_membership.gd`
+  - `src/test/test_suite/unit_test/script/string_format/`
+  - `src/test/test_suite/unit_test/validation/string_format/`
   - `src/test/java/gd/script/gdcc/enums/**`
 - 关联文档：
   - `doc/module_impl/common_rules.md`
@@ -31,6 +33,7 @@
   - `doc/module_impl/frontend/frontend_type_check_analyzer_implementation.md`
   - `doc/module_impl/frontend/frontend_compile_check_analyzer_implementation.md`
   - `doc/module_impl/frontend/frontend_implicit_conversion_matrix.md`
+  - `doc/module_impl/frontend/frontend_string_format_operator_implementation.md`
   - `doc/module_impl/backend/operator_insn_implementation.md`
   - `doc/gdcc_type_system.md`
 - 参考实现 / 事实依据：
@@ -328,6 +331,8 @@ object identity equality 同样沿用这条 `BinaryOpInsn` 主路径，但不走
 
 ### 4.7 字符串格式化 `%` 的 String 左操作数合同
 
+长合同以 `frontend_string_format_operator_implementation.md` 为准；本节只保留 unary / binary 求值顺序需要的摘要。
+
 `%` 与数值取模共享 `MODULE` 运算符入口（与 Godot `Variant::OP_MODULE` 的重载模型一致，不新增枚举）。字符串格式化 = `MODULE` 在 `String` 左操作数上的 metadata 重载，外加一条 runtime-open 精度规则：
 
 - 静态右操作数走普通 metadata exact 匹配：`String % T -> String` 矩阵覆盖全部 builtin 类型；`Array[T]` / `Dictionary[K,V]` 归一化为 `Array` / `Dictionary`；精确名 `Object` 命中。具名 object 子类（如 `Node`、GDCC script class）与 `null` 右操作数 fail-closed（`sema.expression_resolution`）。
@@ -383,7 +388,7 @@ compile gate 当前只把以下状态视为 blocker：
 - `RESOLVED` unary / binary 不再命中 generic compile blocker
 - `DYNAMIC` unary / binary 同样不再命中 generic compile blocker
 - `not in` 经 §4.4 复合规则发布 `RESOLVED(bool)`（非法配对为 `FAILED`），同样不再命中 generic compile blocker
-- 字符串格式化 `%` 对本 gate 零改动：支持面组合发布 `RESOLVED(String)` 不命中 blocker；fail-closed 组合（如 `String % null`）由 upstream `sema.expression_resolution` 阻断且不补 `sema.compile_check`
+- 字符串格式化 `%` 不进入 compile-gate 特判：支持面组合发布 `RESOLVED(String)` 不命中 blocker；fail-closed 组合（如 `String % null`）由 upstream `sema.expression_resolution` 阻断且不补 `sema.compile_check`
 - `ConditionalExpression` 已不再依赖显式 compile-only block：与 unary/binary 一样只依赖 published fact 是否 lowering-ready（见 `frontend_conditional_expression_implementation.md`）
 
 ---
@@ -521,6 +526,7 @@ object equality 当前不只依赖 shared semantic 与 focused unit tests，还�
 后续若继续扩张 unary / binary 支持面，应优先更新：
 
 - 本文档中的当前合同
+- `frontend_string_format_operator_implementation.md`（仅当改动触及 `%` / `MODULE` 的 String 左操作数合同）
 - `frontend_chain_binding_expr_type_implementation.md`
 - `frontend_type_check_analyzer_implementation.md`
 - `frontend_compile_check_analyzer_implementation.md`

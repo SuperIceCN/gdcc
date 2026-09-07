@@ -709,10 +709,10 @@ public final class FrontendExpressionSemanticSupport {
             return FrontendExpressionType.resolved(specialReturnType);
         }
 
-        // String `%` formatting with a runtime-open right operand still always yields String:
+        // String `%` formatting with a runtime-open right operand always yields String:
         // Godot's `do_mod` for a String left operand and every `String % T` metadata entry
-        // return String. This rule must sit directly in front of the generic runtime-open
-        // branch, and it must require a runtime-open right operand so the exact-match stage
+        // return String. This rule sits directly in front of the generic runtime-open
+        // branch and requires a runtime-open right operand, so the exact-match lookup
         // below stays fail-closed for named object subclasses and `null`.
         if (operator == GodotOperator.MODULE
                 && publishedLeftType instanceof GdStringType
