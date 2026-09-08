@@ -30,6 +30,31 @@ typedef struct ${classDef.name} ${classDef.name};
 
 #include "object_fat_ptr_types.h"
 
+<#-- Vtable typedefs in base-before-derived order: a child table embeds its nearest -->
+<#-- slot-introducing ancestor's table BY VALUE as `_super` (the vtable `_super` chain, which -->
+<#-- skips pass-through/override-only classes — never to be confused with the wrapper `_super` -->
+<#-- below), so the ancestor typedef must be complete first. Only slot introducers own a -->
+<#-- typedef; override-only classes reuse that ancestor type, pass-through classes own nothing. -->
+<#list inheritanceOrderedClassDefs as classDef>
+    <#if helper.vtablePlanner().introducesSlot(classDef.name)>
+        <#assign vtableTypeName = helper.renderVtableInstanceTypeName(classDef.name)>
+typedef struct ${vtableTypeName} {
+        <#assign superMemberDecl = helper.renderVtableSuperMemberDecl(classDef)>
+        <#if superMemberDecl?has_content>
+    ${superMemberDecl}
+        </#if>
+        <#list helper.vtablePlanner().slots(classDef.name) as slotEntry>
+            <#-- Inherited slots arrive through the embedded `_super` prefix; only slots this -->
+            <#-- class introduces are declared in its own segment. -->
+            <#if slotEntry.slot.introducerClassName == classDef.name>
+    ${helper.renderVtableSlotMemberDecl(slotEntry.slot)};
+            </#if>
+        </#list>
+} ${vtableTypeName};
+
+    </#if>
+</#list>
+
 <#-- Struct definitions iterate the base-before-derived inheritance order (never raw module -->
 <#-- order): a non-root wrapper embeds its parent BY VALUE as the first field (`Parent _super`), -->
 <#-- which is only legal once the parent struct definition is complete. -->
@@ -41,6 +66,13 @@ struct ${classDef.name} {
         ${classDef.superName} _super;
     <#else>
         GDExtensionObjectPtr _object;
+        <#-- The vtable pointer physically exists only in the root segment and only when the -->
+        <#-- whole hierarchy carries at least one slot; subclasses share it through the -->
+        <#-- offset-0 wrapper embedding. `const void*` sidesteps typedef-order and empty-struct -->
+        <#-- portability concerns (§2.2). -->
+        <#if helper.requiresVtableField(classDef.name)>
+        const void* _vtable;
+        </#if>
     </#if>
     <#list classDef.properties as property>
         <#if !property.static>
@@ -52,6 +84,11 @@ struct ${classDef.name} {
 
 static inline GDExtensionObjectPtr ${classDef.name}_object_ptr(${classDef.name}* self);
 static inline void ${classDef.name}_set_object_ptr(${classDef.name}* self, GDExtensionObjectPtr obj);
+<#if helper.vtablePlanner().introducesSlot(classDef.name)>
+<#-- Vtable accessor declaration (introducers only; override-only classes reuse the nearest -->
+<#-- introducer ancestor's accessor, pass-through classes own none). -->
+static inline const ${helper.renderVtableInstanceTypeName(classDef.name)}* ${helper.renderVtableAccessorName(classDef.name)}(${classDef.name}* self);
+</#if>
 
 const GDExtensionInstanceBindingCallbacks ${classDef.name}_class_binding_callbacks = {
     NULL,

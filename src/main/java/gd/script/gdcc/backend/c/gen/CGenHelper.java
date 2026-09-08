@@ -1798,6 +1798,248 @@ public final class CGenHelper {
         return gdObjectType.getTypeName() + "_object_ptr";
     }
 
+    // ==== Vtable symbols and layout ====
+    //
+    // Single publication point for every vtable-facing symbol/expression the entry templates
+    // emit; templates must never re-spell these locally. Two `_super` chains are involved and
+    // must stay distinct (virtual_override_vtable_implementation.md §2.2): the WRAPPER chain
+    // (direct parent at every generation, backing the root `_vtable` field access) and the
+    // VTABLE chain (nearest slot-introducing ancestor, backing typedef prefix embedding). All
+    // name components use the raw canonical class name (same layer as `struct <Class>`), except
+    // fat-pointer types which come from `renderObjectFatPtrStorageType` (cIdentifier layer).
+
+    /// True when this class's hierarchy (its GDCC root plus all in-module descendants) carries
+    /// at least one vtable slot — exactly the condition for the root wrapper struct to gain a
+    /// `const void* _vtable;` field right after `_object`. `resolvedVtableSymbol` is present in
+    /// precisely that case; its side-branch `NULL` value still requires the field to exist.
+    public boolean requiresVtableField(@NotNull String className) {
+        return vtablePlanner.resolvedVtableSymbol(className).isPresent();
+    }
+
+    /// Vtable typedef naming this class's instance type: the class's own `gdcc_<C>_vtable`
+    /// when it introduces slots, otherwise the nearest introducer ancestor's typedef. Fails for
+    /// slotless classes (side branches own no instance type); templates only query slotted ones.
+    public @NotNull String renderVtableInstanceTypeName(@NotNull String className) {
+        return vtablePlanner.vtableInstanceType(className)
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "Class '" + className + "' has no vtable instance type (it is not slotted)"));
+    }
+
+    /// By-value first member of one introducer's vtable typedef: the nearest slot-introducing
+    /// STRICT ancestor's `gdcc_<P>_vtable _super;`, or "" when no ancestor introduces slots.
+    /// This is the vtable `_super` chain — it skips pass-through and override-only ancestors,
+    /// unlike the wrapper `_super` chain rendered by `renderVtableFieldAccessExpr`.
+    public @NotNull String renderVtableSuperMemberDecl(@NotNull ClassDef classDef) {
+        return vtablePlanner.vtableInstanceType(classDef.getSuperName())
+                .map(superType -> superType + " _super;")
+                .orElse("");
+    }
+
+    /// Function-pointer member declaration for one newly introduced slot:
+    /// `<Ret> (*m_foo)(gdcc_<I>_fat_ptr $self, ...)`. The signature source is the slot
+    /// introducer's own function (self keeps the introducer's fat type); coroutine slots take
+    /// the start-thunk signature (`godot_Object*` return, same parameters).
+    public @NotNull String renderVtableSlotMemberDecl(@NotNull CVtablePlanner.VtableSlot slot) {
+        return renderVtableSlotReturnType(slot) + " (*m_" + slot.methodName() + ")("
+                + renderVtableSlotParameterList(slot) + ")";
+    }
+
+    /// Instance symbol `gdcc_<C>_vtable_inst`; only introducers and override-only classes own
+    /// an instance (pass-through classes share the nearest non-pass-through ancestor's one).
+    public @NotNull String renderVtableInstanceSymbol(@NotNull String className) {
+        if (!vtablePlanner.introducesSlot(className) && !vtablePlanner.overridesInheritedSlot(className)) {
+            throw new IllegalArgumentException(
+                    "Class '" + className + "' owns no vtable instance (it neither introduces nor overrides a slot)");
+        }
+        return "gdcc_" + className + "_vtable_inst";
+    }
+
+    /// Accessor name `<C>_class_vtable`, generated for introducers only and registered in
+    /// `CCodegen.validateFileScopeSymbolsDisjoint` under the same conflict model as `_object_ptr`.
+    public @NotNull String renderVtableAccessorName(@NotNull String className) {
+        return className + "_class_vtable";
+    }
+
+    /// Expression reaching the root `_vtable` field from a `<C>* self`: `self->_vtable` for
+    /// root classes, otherwise one `_super` hop per GDCC wrapper ancestor
+    /// (`self->_super._super._vtable`). Walks the WRAPPER chain via the registry — mirroring
+    /// the struct-embedding decision in entry.h.ftl — so pass-through ancestors are never skipped.
+    public @NotNull String renderVtableFieldAccessExpr(@NotNull String className) {
+        var registry = context.classRegistry();
+        var chain = new StringBuilder("self");
+        var visited = new HashSet<String>();
+        var current = className;
+        while (true) {
+            var currentDef = registry.findGdccClass(current);
+            if (currentDef == null) {
+                throw new IllegalArgumentException(
+                        "Unknown GDCC class '" + current + "' while rendering the vtable field access of '" + className + "'");
+            }
+            var superName = currentDef.getSuperName();
+            if (!registry.isGdccClass(superName)) {
+                break;
+            }
+            if (!visited.add(superName)) {
+                throw new IllegalStateException(
+                        "Detected GDCC inheritance cycle while rendering the vtable field access of '" + className + "'");
+            }
+            chain.append(chain.length() == "self".length() ? "->_super" : "._super");
+            current = superName;
+        }
+        chain.append(chain.length() == "self".length() ? "->_vtable" : "._vtable");
+        return chain.toString();
+    }
+
+    /// Right-hand side of the `_vtable` write in `<C>_class_create_instance`: "" when the
+    /// hierarchy has no field at all (branch 1), `NULL` for side branches (branch 2), and
+    /// `&gdcc_<X>_vtable_inst` otherwise — pass-through classes resolve to the nearest
+    /// non-pass-through ancestor's instance, never NULL (branch 3/4, §2.3).
+    public @NotNull String renderVtableFieldInitExpr(@NotNull String className) {
+        return vtablePlanner.resolvedVtableSymbol(className)
+                .map(symbol -> CVtablePlanner.VTABLE_NULL_SYMBOL.equals(symbol) ? symbol : "&" + symbol)
+                .orElse("");
+    }
+
+    /// Nested C99 designated initializer of one class's vtable instance. Slots stay grouped by
+    /// introducer (the planner's prefix ordering guarantees contiguous, root-most-first
+    /// segments); each segment but the root-most opens with its own `._super = { ... }` nest.
+    /// Every entry is the slot's final overrider for this class: the introducer's own
+    /// implementation symbol, an override trampoline, or NULL for an abstract hole.
+    public @NotNull String renderVtableInstanceInitializer(@NotNull String className) {
+        var slotEntries = vtablePlanner.slots(className);
+        if (slotEntries.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Class '" + className + "' has no vtable slots to initialize an instance with");
+        }
+        var segments = new ArrayList<List<CVtablePlanner.VtableSlotEntry>>();
+        for (var entry : slotEntries) {
+            if (segments.isEmpty()
+                    || !segments.getLast().getFirst().slot().introducerClassName().equals(entry.slot().introducerClassName())) {
+                segments.add(new ArrayList<>());
+            }
+            segments.getLast().add(entry);
+        }
+        return renderVtableInitializerSegment(segments, segments.size() - 1);
+    }
+
+    /// Trampoline symbol for one (overriding class × inherited slot) pair: `gdcc_<D>_vslot_<m>`.
+    public @NotNull String renderVtableTrampolineName(@NotNull String className, @NotNull String methodName) {
+        return "gdcc_" + className + "_vslot_" + methodName;
+    }
+
+    /// Whole trampoline definition adapting an inherited slot's introducer signature to this
+    /// class's overriding implementation. The `(D*)self.ptr` downcast is the single sanctioned
+    /// exception to the no-bare-GDCC-cast contract (explicit_c_inheritance_layout_contract.md
+    /// §5): reached through D's own vtable the dynamic type is always D or a descendant, and
+    /// the offset-0 wrapper embedding makes the pointer adjustment-free.
+    public @NotNull String renderVtableTrampolineDefinition(
+            @NotNull String className,
+            @NotNull CVtablePlanner.VtableSlotEntry entry
+    ) {
+        var slot = entry.slot();
+        if (!entry.finalOverriderClassName().equals(className) || slot.introducerClassName().equals(className)) {
+            throw new IllegalArgumentException(
+                    "Class '" + className + "' is not the non-introducer final overrider of slot '" + slot.methodName() + "'");
+        }
+        var overriderFunction = entry.finalOverriderFunction();
+        // Built first: validates the synthetic leading self the forwarding below relies on.
+        var parameterList = renderVtableSlotParameterList(slot);
+        var forwardedArgs = new StringBuilder();
+        for (var index = 1; index < slot.introducerFunction().getParameterCount(); index++) {
+            var parameter = slot.introducerFunction().getParameter(index);
+            if (parameter == null) {
+                throw new IllegalStateException(
+                        "Vtable slot '" + slot.methodName() + "' misses parameter at index " + index);
+            }
+            forwardedArgs.append(", $").append(parameter.getName());
+        }
+        var call = renderVtableImplSymbol(className, overriderFunction.getName(), slot.coroutine())
+                + "(s" + forwardedArgs + ")";
+        return renderVtableSlotReturnType(slot) + " " + renderVtableTrampolineName(className, slot.methodName()) + "("
+                + parameterList + ") {\n"
+                + renderObjectFatPtrStorageType(new GdObjectType(className)) + " s = { (" + className + "*)$self.ptr, $self.instance_id };\n"
+                + (isVoidSlot(slot) ? call + ";" : "return " + call + ";") + "\n"
+                + "}";
+    }
+
+    /// One nested initializer segment: `.{ ._super = <parent segment>, .m_x = value, ... }`
+    /// rendered recursively from the root-most introducer up to the instance's own type.
+    private @NotNull String renderVtableInitializerSegment(
+            @NotNull List<List<CVtablePlanner.VtableSlotEntry>> segments,
+            int segmentIndex
+    ) {
+        var builder = new StringBuilder("{ ");
+        if (segmentIndex > 0) {
+            builder.append("._super = ")
+                    .append(renderVtableInitializerSegment(segments, segmentIndex - 1))
+                    .append(", ");
+        }
+        var first = true;
+        for (var entry : segments.get(segmentIndex)) {
+            if (!first) {
+                builder.append(", ");
+            }
+            builder.append(".m_").append(entry.slot().methodName()).append(" = ").append(renderVtableSlotEntryValue(entry));
+            first = false;
+        }
+        return builder.append(" }").toString();
+    }
+
+    /// Instance entry value for one slot: NULL for an abstract hole, the introducer's own
+    /// implementation symbol when it is also the final overrider, else the final overrider's
+    /// trampoline.
+    private @NotNull String renderVtableSlotEntryValue(@NotNull CVtablePlanner.VtableSlotEntry entry) {
+        if (entry.abstractHole()) {
+            return CVtablePlanner.VTABLE_NULL_SYMBOL;
+        }
+        var slot = entry.slot();
+        if (entry.finalOverriderClassName().equals(slot.introducerClassName())) {
+            return renderVtableImplSymbol(slot.introducerClassName(), slot.methodName(), slot.coroutine());
+        }
+        return renderVtableTrampolineName(entry.finalOverriderClassName(), slot.methodName());
+    }
+
+    /// Slot return C type: coroutine slots point at start thunks (`godot_Object*`), everything
+    /// else uses the introducer function's declared return type.
+    private @NotNull String renderVtableSlotReturnType(@NotNull CVtablePlanner.VtableSlot slot) {
+        return slot.coroutine() ? "godot_Object*" : renderGdTypeInC(slot.introducerFunction().getReturnType());
+    }
+
+    /// Slot parameter list mirroring `func.ftl`'s header shape: every introducer parameter
+    /// (leading fat `self` included) as `<type> $<name>`.
+    private @NotNull String renderVtableSlotParameterList(@NotNull CVtablePlanner.VtableSlot slot) {
+        var function = slot.introducerFunction();
+        if (function.getParameterCount() == 0
+                || function.getParameter(0) == null
+                || !"self".equals(Objects.requireNonNull(function.getParameter(0)).getName())) {
+            throw new IllegalStateException(
+                    "Vtable slot '" + slot.methodName() + "' lacks the synthetic leading self parameter");
+        }
+        var builder = new StringBuilder();
+        for (var index = 0; index < function.getParameterCount(); index++) {
+            var parameter = function.getParameter(index);
+            if (parameter == null) {
+                throw new IllegalStateException(
+                        "Vtable slot '" + slot.methodName() + "' misses parameter at index " + index);
+            }
+            if (index > 0) {
+                builder.append(", ");
+            }
+            builder.append(renderGdTypeRefInC(parameter.getType())).append(" $").append(parameter.getName());
+        }
+        return builder.toString();
+    }
+
+    /// Direct implementation symbol for one class's method: `<C>_<m>`, or the coroutine start
+    /// thunk `<C>_<m>__coro_start` for coroutine slots (their entries always start coroutines).
+    private @NotNull String renderVtableImplSymbol(@NotNull String className, @NotNull String methodName, boolean coroutine) {
+        return className + "_" + methodName + (coroutine ? "__coro_start" : "");
+    }
+
+    private boolean isVoidSlot(@NotNull CVtablePlanner.VtableSlot slot) {
+        return !slot.coroutine() && slot.introducerFunction().getReturnType() instanceof GdVoidType;
+    }
+
     /// Render the dedicated constructor-time property-init apply helper name.
     /// This stays in `CGenHelper` because it is pure generated-symbol naming, not a
     /// control-flow concern.

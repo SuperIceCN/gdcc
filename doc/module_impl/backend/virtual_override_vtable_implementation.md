@@ -376,6 +376,26 @@ void <C>_class_call_virtual_with_data(GDExtensionClassInstancePtr p_instance, ..
 
 ### Step 2：vtable 布局与模板生成（结构落地，不改调用点）
 
+- **实施状态：已完成（2026-09-08）**。
+    - 验收：`script/run-gradle-targeted-tests.sh --tests CVtableCodegenTest,CCodegenTest` 全绿（`CVtableCodegenTest` 10 个用例）；回归 `gd.script.gdcc.backend.c.gen.*` 全包及 `GdScriptUnitTestCompileRunnerTest`、`GdScriptEngineVirtualOverrideRuntimeTest` 全绿（后者经 zig 编译 + Godot 运行，证明含 vtable 的生成 C 代码可编译可运行）。
+    - 实施要点回填：
+        - `CGenHelper` 新增 vtable 渲染区段（单一发布点）：`requiresVtableField`（层级判定 = `resolvedVtableSymbol` 非空，旁支 `NULL` 也要求字段存在）、`renderVtableInstanceTypeName`、`renderVtableSuperMemberDecl`（vtable `_super` 链，跳过非 introducer）、`renderVtableSlotMemberDecl`（slot 函数指针签名，self 为引入者 fat 类型；coroutine slot 用 start thunk 签名 `godot_Object*`）、`renderVtableInstanceSymbol`、`renderVtableAccessorName`、`renderVtableFieldAccessExpr`（沿 **wrapper 链**直达根字段，经 registry 逐级走直接父类，pass-through 不跳过）、`renderVtableFieldInitExpr`（四分支 RHS：空/`NULL`/`&实例符号`）、`renderVtableInstanceInitializer`（C99 嵌套指定初始化器，按 introducer 分段、final overrider 直填/ trampoline/abstract hole 填 `NULL`）、`renderVtableTrampolineName`/`renderVtableTrampolineDefinition`（体内含唯一获准的 GDCC 下行裸 cast 复合字面量）。
+        - `entry.h.ftl`：vtable typedef 段置于 `object_fat_ptr_types.h` include 之后、wrapper struct 之前，按 `inheritanceOrderedClassDefs` 序生成（父表先完整）；根类 `_object` 后条件插入 `const void* _vtable;`；accessor 声明仅 introducer。
+        - `entry.c.ftl`：trampoline+实例段置于 default userdata 段之后、bind methods 之前，**按 `inheritanceOrderedClassDefs`（base-before-derived）发射**——子类实例会取**祖先** trampoline 的地址（祖先仍是继承 slot 的 final overrider 时），而 static trampoline 无头文件原型，必须定义先于使用；同类内保持 trampoline 先于本类实例；accessor 定义紧随 `_object_ptr` helpers 之后；create_instance 在 `set_object_ptr` 之后、`godot_object_set_instance`/POSTINITIALIZE 之前写入 `_vtable`。
+        - `CCodegen.validateFileScopeSymbolsDisjoint`：**条件登记** `<C>_class_vtable`（仅 `introducesSlot` 类）——accessor 只为 introducer 生成，slotless 类的用户方法 `class_vtable` 保持合法；撞名时与既有 machinery 同一 fail-fast 模型。
+    - 既有断言更新清单：无（`CCodegenTest` 全量零 diff 通过——整层无 slot 的既有 golden 不受模板改动影响）。
+    - 审阅回填：`review-expert-a` 初审"有条件通过"——高风险 1 条（trampoline/实例段按 `module.classDefs` 源文件序发射，derived-first 时子类实例引用未定义的祖先 trampoline，C99 取址未声明）已修复为 `inheritanceOrderedClassDefs` 并补 derived-first 非空转回归；低风险 2 条（连续 introducer typedef 锚点已补；`gdcc_` 前缀符号登记维持计划范围、评审确认不上调）。复核结论：**通过**。`review-expert-c` 独立复核（C17 语义、符号顺序、边界形态推演）：**通过**，无高/中/低风险问题。
+    - 测试锚定回填（`CVtableCodegenTest`，正反对照）：
+        - 全布局链路（`A(引入 foo)→B(pass-through)→C(引入 bar)→D(覆写两者)`）：根字段位置、typedef 前缀跳过 pass-through、accessor 沿 wrapper 链直达根字段（不递归父 accessor）、实例 final overrider 三分支（直填/trampoline/嵌套初始化器）、void 与非 void trampoline 形态、create_instance branch 3/4 与 POSTINITIALIZE 顺序、pass-through 禁止写 NULL；
+        - 旁支夹具（`Root + A(引入)+AChild(覆写) + B(旁支)`）：根有字段、Root/B 写 `NULL`（防塌成 branch 1 无赋值）、A/AChild 写本类实例；
+        - typedef 链与表值链分离（`A(引入)→B(仅覆写)→C(pass-through)`）：无 `gdcc_B_vtable` typedef/accessor，`gdcc_B_vtable_inst` 以 `gdcc_A_vtable` 为类型含 trampoline，`C` 的 create_instance 写 `&gdcc_B_vtable_inst`（非 A 的实例）；
+        - 整层无 slot：两份 entry 文件完全不出现 "vtable" 子串（模块名已避开该子串）；
+        - **derived-first 模块序回归**（评审高风险修复锚定）：`DfA(引入 m1)→DfB(覆写 m1)→DfC(引入 m2)→DfD(覆写 m2)` 以子类在前顺序构造模块，断言祖先 trampoline `gdcc_DfB_vslot_m1` 的 static 定义先于引用它的 `gdcc_DfC_vtable_inst`（已实证回退为 `module.classDefs` 时该断言失败，测试非空转）；
+        - **连续 introducer / §2.2 四级混合链**：`MxA(根，无方法)→MxB(引入 m1)→MxC(引入 m2)→MxD(覆写 m1、m2)` → `gdcc_MxC_vtable` 嵌相邻 introducer `gdcc_MxB_vtable _super;`（不跳更远祖先）、`gdcc_MxB_vtable` 无 `_super`、slotless 根 MxA 写 `NULL`（中途引入形态）、MxD 实例以 `gdcc_MxC_vtable` 为类型含双 trampoline；
+        - inner class：vtable 符号保留 raw canonical（`gdcc_Outer__sub__Base_vtable`），slot 签名 fat 类型归一（`gdcc_Outer_sub_Base_fat_ptr`）；
+        - `class_vtable` 撞名：introducer 上撞名 fail-fast（含符号名）；非 introducer 上同名用户方法合法（锚定条件登记）；
+        - coroutine slot：签名为 `godot_Object*`，实例条目 `<C>_<m>__coro_start`，trampoline 调 start thunk；
+        - abstract 引入 slot：abstract 类实例条目填 `NULL`，具体实现类填 trampoline。
 - 改动：`entry.h.ftl`（vtable typedef 按继承序、根类 `_vtable` 字段、accessor 声明）、`entry.c.ftl`（accessor 定义、trampoline、vtable 实例、create_instance 初始化赋值）、`CGenHelper`（渲染方法：vtable 类型名/实例名/accessor 名/根字段访问链/trampoline 名/层级判定）、`CCodegen.validateFileScopeSymbolsDisjoint`（`<C>_class_vtable` 登记）。
 - 测试：新增 `CVtableCodegenTest`（必要时并入 `CCodegenTest`）：
     - 含 polymorphic 层级的 `entry.h`：根类结构体 `_object` 后紧跟 `const void* _vtable;`；子表 typedef 以**最近 `introducesSlot` 祖先**的 `gdcc_<P>_vtable _super;` 为首成员（覆盖 `A(引入 foo)→B(pass-through)→C(引入 bar)` 层级：C 的表直接嵌 `gdcc_A_vtable`，B 无任何 vtable 符号）；accessor 声明；

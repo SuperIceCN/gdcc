@@ -176,6 +176,27 @@ static ${helper.renderDefaultUserdataTypeName(classDef, function)} ${helper.rend
 </#list>
 </#list>
 
+<#-- Vtable trampolines and instances. A trampoline adapts an inherited slot's introducer -->
+<#-- signature to the final overrider's implementation (its downcast is the single sanctioned -->
+<#-- exception to the no-bare-GDCC-cast contract); instances fill each slot with the final -->
+<#-- overrider — direct impl symbol, trampoline, or NULL for an abstract hole. Iteration uses -->
+<#-- the base-before-derived inheritance order (never raw module order): a derived class's -->
+<#-- instance takes the address of an ANCESTOR's trampoline (when the ancestor stays the final -->
+<#-- overrider of an inherited slot), and static trampolines have no header prototype, so every -->
+<#-- trampoline must be defined before any instance that can reference it. -->
+<#list inheritanceOrderedClassDefs as classDef>
+    <#list helper.vtablePlanner().slots(classDef.name) as slotEntry>
+        <#if slotEntry.finalOverriderClassName == classDef.name && slotEntry.slot.introducerClassName != classDef.name>
+static ${helper.renderVtableTrampolineDefinition(classDef.name, slotEntry)}
+
+        </#if>
+    </#list>
+    <#if helper.vtablePlanner().introducesSlot(classDef.name) || helper.vtablePlanner().overridesInheritedSlot(classDef.name)>
+static const ${helper.renderVtableInstanceTypeName(classDef.name)} ${helper.renderVtableInstanceSymbol(classDef.name)} = ${helper.renderVtableInstanceInitializer(classDef.name)};
+
+    </#if>
+</#list>
+
 <#-- Bind Methods for each class.-->
 <#-- The local `class_name` slot remains the canonical owner identity that registration used above.-->
 <#list module.classDefs as classDef>
@@ -260,6 +281,19 @@ static inline void ${classDef.name}_set_object_ptr(${classDef.name}* self, GDExt
 }
 </#list>
 
+<#-- Vtable accessors (introducers only) read the root `_vtable` field straight through the -->
+<#-- WRAPPER `_super` chain — never a parent accessor (a pass-through parent has none) and -->
+<#-- never the vtable `_super` chain (which skips non-introducer classes). -->
+<#list module.classDefs as classDef>
+    <#if helper.vtablePlanner().introducesSlot(classDef.name)>
+        <#assign vtableTypeName = helper.renderVtableInstanceTypeName(classDef.name)>
+static inline const ${vtableTypeName}* ${helper.renderVtableAccessorName(classDef.name)}(${classDef.name}* self) {
+    return (const ${vtableTypeName}*)${helper.renderVtableFieldAccessExpr(classDef.name)};
+}
+
+    </#if>
+</#list>
+
 // GdExtension Methods for each class
 <#list module.classDefs as classDef>
 <#list classDef.properties as property>
@@ -275,6 +309,15 @@ GDExtensionObjectPtr ${classDef.name}_class_create_instance(void* p_class_userda
     GDExtensionObjectPtr obj = godot_classdb_construct_object2(GD_STATIC_SN(u8"${helper.resolveNearestNativeAncestorName(classDef)}"));
     ${classDef.name}* self = godot_mem_alloc(sizeof(${classDef.name}));
     ${classDef.name}_set_object_ptr(self, obj);
+    <#-- Vtable field initialization happens before the POSTINITIALIZE notification (which is -->
+    <#-- what runs user `_init` through the constructor chain), so virtual calls inside `_init` -->
+    <#-- already dispatch through a valid table. Four cases (§2.3): no field at all / NULL for -->
+    <#-- side branches / this class's own instance / the nearest non-pass-through ancestor's -->
+    <#-- instance value for pass-through classes — driven entirely by the planner. -->
+    <#assign vtableFieldInit = helper.renderVtableFieldInitExpr(classDef.name)>
+    <#if vtableFieldInit?has_content>
+    ${helper.renderVtableFieldAccessExpr(classDef.name)} = ${vtableFieldInit};
+    </#if>
     godot_object_set_instance(obj, GD_STATIC_SN(u8"${classDef.name}"), self);
     godot_object_set_instance_binding(obj, class_library, self, &${classDef.name}_class_binding_callbacks);
     if (p_notify_postinitialize) {
