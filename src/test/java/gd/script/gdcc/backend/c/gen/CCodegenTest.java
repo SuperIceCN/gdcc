@@ -832,6 +832,168 @@ public class CCodegenTest {
         assertFalse(innerDispatchBody.contains("gdcc_is_editor_hint"), innerDispatchBody);
     }
 
+    /// R1/R2 (§2.4): a subclass with a GDCC parent must fall through to the parent callbacks when
+    /// no own override matches — the engine only ever invokes the most-derived instance's
+    /// registered callbacks and never walks extension parents itself. The parent (engine super)
+    /// keeps the plain `return NULL;` tail, and the child forwarding trails every own branch so
+    /// editor gates remain inside their own-hit branches.
+    @Test
+    public void generateShouldForwardVirtualCallbacksToGdccParent() throws Exception {
+        var parentClass = new LirClassDef("VirtualFwdParent", "Node");
+        var parentReady = newFunction("_ready", GdVoidType.VOID);
+        entry(parentReady).setTerminator(new ReturnInsn(null));
+        parentClass.addFunction(parentReady);
+
+        var childClass = new LirClassDef("VirtualFwdChild", "VirtualFwdParent");
+        var childProcess = newFunction("_process", GdVoidType.VOID);
+        childProcess.addParameter(new LirParameterDef("delta", GdFloatType.FLOAT, null, childProcess));
+        entry(childProcess).setTerminator(new ReturnInsn(null));
+        childClass.addFunction(childProcess);
+
+        var module = new LirModule("virtual_forward_module", List.of(parentClass, childClass));
+        var classRegistry = new ClassRegistry(ExtensionApiLoader.loadDefault());
+        ProjectInfo projectInfo = new ProjectInfo("test", GodotVersion.V451, Path.of(".")) {
+        };
+        var codegen = new CCodegen();
+        codegen.prepare(new CodegenContext(projectInfo, classRegistry), module);
+        var entrySource = generatedFileText(codegen.generate(), "entry.c");
+
+        var childLookupBody = resolveFunctionBodyByPrefix(
+                entrySource,
+                "void* VirtualFwdChild_class_get_virtual_with_data("
+        );
+        assertOrdered(
+                childLookupBody,
+                "return (void*)VirtualFwdChild__process;",
+                "return VirtualFwdParent_class_get_virtual_with_data(p_class_userdata, p_name, p_hash);"
+        );
+        assertFalse(childLookupBody.contains("return NULL;"), childLookupBody);
+
+        var childDispatchBody = resolveFunctionBodyByPrefix(
+                entrySource,
+                "void VirtualFwdChild_class_call_virtual_with_data("
+        );
+        var processBranch = resolveVirtualDispatchBranch(childDispatchBody, "VirtualFwdChild__process");
+        assertOrdered(processBranch, "if (gdcc_is_editor_hint()) {", "return;", "}", "ptrcall");
+        assertOrdered(
+                childDispatchBody,
+                "ptrcall",
+                "VirtualFwdParent_class_call_virtual_with_data(p_instance, p_name, p_virtual_call_userdata, p_args, r_ret);"
+        );
+
+        // Engine-parent negative anchor: the parent itself keeps the NULL tail and emits no hop.
+        var parentLookupBody = resolveFunctionBodyByPrefix(
+                entrySource,
+                "void* VirtualFwdParent_class_get_virtual_with_data("
+        );
+        assertContainsAll(parentLookupBody, "return (void*)VirtualFwdParent__ready;", "return NULL;");
+        assertFalse(parentLookupBody.contains("class_get_virtual_with_data("), parentLookupBody);
+        var parentDispatchBody = resolveFunctionBodyByPrefix(
+                entrySource,
+                "void VirtualFwdParent_class_call_virtual_with_data("
+        );
+        assertFalse(parentDispatchBody.contains("class_call_virtual_with_data("), parentDispatchBody);
+    }
+
+    /// §2.4: a subclass without any own virtual override emits empty own-branch sections but
+    /// still forwards both callbacks to its GDCC parent — otherwise the engine would silently
+    /// drop the parent's virtual implementations for instances of the subclass.
+    @Test
+    public void generateShouldForwardVirtualCallbacksForSubclassWithoutOwnOverrides() throws Exception {
+        var parentClass = new LirClassDef("VirtualEmptyParent", "Node");
+        var parentReady = newFunction("_ready", GdVoidType.VOID);
+        entry(parentReady).setTerminator(new ReturnInsn(null));
+        parentClass.addFunction(parentReady);
+
+        var childClass = new LirClassDef("VirtualEmptyChild", "VirtualEmptyParent");
+
+        var module = new LirModule("virtual_empty_forward_module", List.of(parentClass, childClass));
+        var classRegistry = new ClassRegistry(ExtensionApiLoader.loadDefault());
+        ProjectInfo projectInfo = new ProjectInfo("test", GodotVersion.V451, Path.of(".")) {
+        };
+        var codegen = new CCodegen();
+        codegen.prepare(new CodegenContext(projectInfo, classRegistry), module);
+        var entrySource = generatedFileText(codegen.generate(), "entry.c");
+
+        var childLookupBody = resolveFunctionBodyByPrefix(
+                entrySource,
+                "void* VirtualEmptyChild_class_get_virtual_with_data("
+        );
+        assertFalse(childLookupBody.contains("godot_StringName_op_equal_StringName"), childLookupBody);
+        assertContainsAll(
+                childLookupBody,
+                "return VirtualEmptyParent_class_get_virtual_with_data(p_class_userdata, p_name, p_hash);"
+        );
+
+        var childDispatchBody = resolveFunctionBodyByPrefix(
+                entrySource,
+                "void VirtualEmptyChild_class_call_virtual_with_data("
+        );
+        assertFalse(childDispatchBody.contains("p_virtual_call_userdata =="), childDispatchBody);
+        assertContainsAll(
+                childDispatchBody,
+                "VirtualEmptyParent_class_call_virtual_with_data(p_instance, p_name, p_virtual_call_userdata, p_args, r_ret);"
+        );
+    }
+
+    /// §2.4: forwarding composes level by level — a grandchild with no own overrides must hop
+    /// through the intermediate GDCC class (not directly to the root), so each level's own
+    /// overrides and editor gates keep their chance to match.
+    @Test
+    public void generateShouldChainVirtualForwardingAcrossMultipleGdccLevels() throws Exception {
+        var rootClass = new LirClassDef("VirtualChainRoot", "Node");
+        var rootReady = newFunction("_ready", GdVoidType.VOID);
+        entry(rootReady).setTerminator(new ReturnInsn(null));
+        rootClass.addFunction(rootReady);
+
+        var midClass = new LirClassDef("VirtualChainMid", "VirtualChainRoot");
+        var leafClass = new LirClassDef("VirtualChainLeaf", "VirtualChainMid");
+
+        var module = new LirModule("virtual_chain_forward_module", List.of(rootClass, midClass, leafClass));
+        var classRegistry = new ClassRegistry(ExtensionApiLoader.loadDefault());
+        ProjectInfo projectInfo = new ProjectInfo("test", GodotVersion.V451, Path.of(".")) {
+        };
+        var codegen = new CCodegen();
+        codegen.prepare(new CodegenContext(projectInfo, classRegistry), module);
+        var entrySource = generatedFileText(codegen.generate(), "entry.c");
+
+        var leafLookupBody = resolveFunctionBodyByPrefix(
+                entrySource,
+                "void* VirtualChainLeaf_class_get_virtual_with_data("
+        );
+        assertContainsAll(
+                leafLookupBody,
+                "return VirtualChainMid_class_get_virtual_with_data(p_class_userdata, p_name, p_hash);"
+        );
+        assertFalse(leafLookupBody.contains("VirtualChainRoot_class_get_virtual_with_data("), leafLookupBody);
+        var leafDispatchBody = resolveFunctionBodyByPrefix(
+                entrySource,
+                "void VirtualChainLeaf_class_call_virtual_with_data("
+        );
+        assertContainsAll(
+                leafDispatchBody,
+                "VirtualChainMid_class_call_virtual_with_data(p_instance, p_name, p_virtual_call_userdata, p_args, r_ret);"
+        );
+        assertFalse(leafDispatchBody.contains("VirtualChainRoot_class_call_virtual_with_data("), leafDispatchBody);
+
+        var midLookupBody = resolveFunctionBodyByPrefix(
+                entrySource,
+                "void* VirtualChainMid_class_get_virtual_with_data("
+        );
+        assertContainsAll(
+                midLookupBody,
+                "return VirtualChainRoot_class_get_virtual_with_data(p_class_userdata, p_name, p_hash);"
+        );
+        var midDispatchBody = resolveFunctionBodyByPrefix(
+                entrySource,
+                "void VirtualChainMid_class_call_virtual_with_data("
+        );
+        assertContainsAll(
+                midDispatchBody,
+                "VirtualChainRoot_class_call_virtual_with_data(p_instance, p_name, p_virtual_call_userdata, p_args, r_ret);"
+        );
+    }
+
     @Test
     public void generateShouldUseSessionBoundBodyRendererInsteadOfPublicGenerateFuncBody() {
         var workerClass = new LirClassDef("EngineUsageWorker", "RefCounted");

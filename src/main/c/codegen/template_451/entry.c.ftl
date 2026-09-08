@@ -400,7 +400,14 @@ void* ${classDef.name}_class_get_virtual_with_data(void* p_class_userdata, GDExt
             }
         </#if>
     </#list>
+    <#if helper.checkGdccClassByName(classDef.superName)>
+    <#-- No own override matched: forward along the GDCC extension class chain (godot-cpp
+         class_db.cpp get_virtual_func pattern); native parents are covered by the engine's
+         own fallback, so the chain only hops across GDCC classes. -->
+    return ${classDef.superName}_class_get_virtual_with_data(p_class_userdata, p_name, p_hash);
+    <#else>
     return NULL;
+    </#if>
 }
 
 void ${classDef.name}_class_call_virtual_with_data(GDExtensionClassInstancePtr p_instance,
@@ -428,6 +435,14 @@ void ${classDef.name}_class_call_virtual_with_data(GDExtensionClassInstancePtr p
             }
         </#if>
     </#list>
+    <#if helper.checkGdccClassByName(classDef.superName)>
+    <#-- No own branch matched: the userdata may come from a GDCC parent's get_virtual (parent
+         impl address or parent default userdata instance), so forward to the parent dispatch.
+         The engine always invokes the most-derived instance's callback, hence the chain must
+         fall through level by level; (Parent*)p_instance is layout-legal via offset-0 embedding.
+         Runs after every own branch so the editor gates stay inside their own-hit branches. -->
+    ${classDef.superName}_class_call_virtual_with_data(p_instance, p_name, p_virtual_call_userdata, p_args, r_ret);
+    </#if>
 }
 
 // Methods for ${classDef.name}

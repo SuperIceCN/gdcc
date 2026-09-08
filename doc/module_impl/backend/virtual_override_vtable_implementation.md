@@ -409,6 +409,19 @@ void <C>_class_call_virtual_with_data(GDExtensionClassInstancePtr p_instance, ..
 
 ### Step 3：engine virtual 父类转发（R1/R2）
 
+- **实施状态：已完成（2026-09-09）**。
+    - 验收：`script/run-gradle-targeted-tests.sh --tests CCodegenTest,GdScriptEngineVirtualOverrideRuntimeTest,GdScriptUnitTestCompileRunnerTest` 全绿（runtime 套件 6 用例含新 fixture 实跑通过，非 skipped）；回归 `gd.script.gdcc.backend.c.gen.*` 全包全绿。
+    - 实施要点回填：
+        - `entry.c.ftl`：`get_virtual_with_data` 尾部在 `helper.checkGdccClassByName(classDef.superName)` 时由 `return NULL;` 改为 `return <P>_class_get_virtual_with_data(p_class_userdata, p_name, p_hash);`，engine 父类保持 `return NULL;` 不变；`call_virtual_with_data` 尾部在同条件追加 `<P>_class_call_virtual_with_data(p_instance, p_name, p_virtual_call_userdata, p_args, r_ret);`，位于全部本类 userdata 分支之后（editor 门留在本类命中分支内）。
+        - 跨类引用顺序无新约束：两个 virtual 函数均由 `entry.h.ftl:111-113` 提前声明，子类函数体引用父类符号与模块类序无关。
+        - 符号命名沿用 raw canonical 类名（与 `_class_destructor` 等既有 machinery 一致），无新增文件级符号，无需登记冲突表。
+    - 既有断言更新清单：无（`CCodegenTest`/`CVtableCodegenTest` 全量零 diff 通过——既有断言均未钉住 GDCC 父类场景的 `return NULL;` 尾部）。
+    - 测试锚定回填（正反对照）：
+        - `CCodegenTest.generateShouldForwardVirtualCallbacksToGdccParent`：子类两函数尾部转发 + 本类分支先于转发（`assertOrdered`）+ `_process` editor 门留在本类命中分支内 + 转发后无 `return NULL;`；父类（engine 父）保持 `return NULL;` 且无转发调用（反向锚定）。
+        - `CCodegenTest.generateShouldForwardVirtualCallbacksForSubclassWithoutOwnOverrides`：本类零 virtual 覆写 → 两函数无本类分支（反向）但尾部仍转发。
+        - `CCodegenTest.generateShouldChainVirtualForwardingAcrossMultipleGdccLevels`：三级链逐跳转发（Leaf→Mid、Mid→Root），叶类不直接跳到根（反向锚定"逐级"语义）。
+        - runtime fixture `runtime/virtual/ready_parent_chain_dispatch.gd`：顶层 Node harness + inner `Parent`/`ChildFallback`（仅 `pass`，不覆写）/`ChildOverride`（覆写 `_ready`），harness `_ready` 内 `add_child` 两子实例纯 engine 驱动；validation 断言 `ChildFallback` 实例父实现计数=1（修复锚点）、`ChildOverride` 实例子实现=1 且父实现=0（R2 最派生分派不回归）。已实证回退模板改动后该 fixture 在 Godot 实跑中失败（red→green 锚定）。
+    - 审阅回填：`review-expert-a` 审阅结论**通过**，无高/中/低风险问题；逐项确认转发条件/参数透传/editor 门顺序/声明先于使用/偏移 0 ABI/默认 userdata 地址身份/夹具合同/文档一致性，并对照 Step 3 测试清单逐条确认覆盖无遗漏。
 - 改动：`entry.c.ftl` 两个 virtual 函数尾部转发段（§2.4）。
 - **既有 golden 影响清单（须人工核对 diff）**：所有"有 GDCC 父类"的类（如现有继承用例中的 `GDChildNode`、`GDLeafNode`、inner 继承链等），其 `get_virtual_with_data` 尾部从 `return NULL;` 变为 `return <P>_class_get_virtual_with_data(...)`，`call_virtual_with_data` 尾部追加转发调用；engine 父类的类不变化。
 - 测试：

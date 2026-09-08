@@ -25,7 +25,8 @@ class GdScriptEngineVirtualOverrideRuntimeTest {
     private static final List<String> SCRIPT_RESOURCE_PATHS = List.of(
             PHYSICS_PROCESS_SCRIPT_RESOURCE_PATH,
             "runtime/virtual/process_called_and_delta_valid.gd",
-            "runtime/virtual/ready_called_once.gd"
+            "runtime/virtual/ready_called_once.gd",
+            "runtime/virtual/ready_parent_chain_dispatch.gd"
     );
     private static final Path SCRIPT_ROOT = Path.of("src", "test", "test_suite", "unit_test", "script");
     private static final Path VALIDATION_ROOT = Path.of("src", "test", "test_suite", "unit_test", "validation");
