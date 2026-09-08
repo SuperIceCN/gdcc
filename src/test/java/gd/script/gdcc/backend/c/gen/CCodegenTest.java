@@ -3162,16 +3162,21 @@ public class CCodegenTest {
     @Test
     void generateFailsFastOnModuleInheritanceCycle() {
         // The frontend rejects inheritance cycles before lowering; the backend still fails fast
-        // on hand-built cyclic modules instead of emitting silently unordered C.
+        // on hand-built cyclic modules instead of emitting silently unordered C. The vtable
+        // planner mounted on the helper chain now detects the GDCC cycle already at prepare(),
+        // earlier than generate()'s own topology guard, so the assertion covers the whole
+        // prepare/generate sequence.
         var classA = new LirClassDef("GdCycleA", "GdCycleB");
         var classB = new LirClassDef("GdCycleB", "GdCycleA");
         var module = new LirModule("topo_cycle_module", List.of(classA, classB));
         var codegen = new CCodegen();
-        codegen.prepare(newStaticTestContext(), module);
 
-        var exception = assertThrows(IllegalStateException.class, codegen::generate);
+        var exception = assertThrows(IllegalStateException.class, () -> {
+            codegen.prepare(newStaticTestContext(), module);
+            codegen.generate();
+        });
         assertTrue(
-                exception.getMessage().contains("Inheritance cycle among module classes"),
+                exception.getMessage().contains("inheritance cycle") || exception.getMessage().contains("Inheritance cycle"),
                 exception.getMessage()
         );
     }

@@ -333,6 +333,15 @@ void <C>_class_call_virtual_with_data(GDExtensionClassInstancePtr p_instance, ..
 
 ### Step 1：vtable 规划器 `CVtablePlanner`（纯分析，不改生成输出）
 
+- **实施状态：已完成（2026-09-08）**。
+    - 验收：`CVtablePlannerTest`（25 个用例）全绿；`./gradlew classes --no-daemon --info --console=plain` 通过；回归 `gd.script.gdcc.backend.c.gen.*` 全包及 `GdScriptUnitTestCompileRunnerTest`、`GdScriptEngineVirtualOverrideRuntimeTest` 全绿。
+    - 实施要点回填：
+        - `CVtablePlanner`（`src/main/java/gd/script/gdcc/backend/c/gen/CVtablePlanner.java`）构造期完成全部规划；GDCC 父边仅在父类**同时**存在于模块列表与 registry 时承认（容错规则）；覆写目标按"最近祖先声明"解析，排除项（`_init`/static/hidden/lambda）声明会断开覆写链（其下同名方法视为全新声明，不触发 D1）；final overrider 沿链取最近非排除声明。
+        - D1 冲突与"具体类未实现 abstract slot"抛 `CodegenException`（含两类名与方法名）；继承环抛 `IllegalStateException`；coroutine slot 经 `VtableSlot.coroutine` 暴露（start thunk 规划，D4）。
+        - `CGenHelper` 构造链挂载 planner，`CGenHelper.vtablePlanner()` 暴露只读查询。
+    - 既有断言更新清单（已人工核对 diff，均属"fail-fast 提前"的合理变化）：
+        - `CCodegenTest.generateFailsFastOnModuleInheritanceCycle`：环检测提前到 `prepare()`（planner 构造期），断言改为覆盖 prepare+generate 序列；异常仍为 `IllegalStateException`，检测语义不变。
+        - `BackendPropertyAccessResolverTest.resolveObjectPropertyFailsOnInheritanceCycle`：环在 helper 构造期抛 `IllegalStateException`（原断言为 resolver 路径的 `InvalidInsnException`）；resolver 自身的环检测转为防御性兜底。
 - 改动：
     - 新增 `src/main/java/gd/script/gdcc/backend/c/gen/CVtablePlanner.java`：输入模块类列表 + `ClassRegistry`，输出每类 slot 列表、final overrider / introducer 映射、调用点判定谓词 `isPolymorphicCall(receiverTypeName, methodName)`（receiver 真后代覆写，§2.1 等价判定）、slot 查询 `findVtableSlot(ownerClassName, methodName)`，以及只读角色查询 `slotted`/`introducesSlot`/`pass-through` 和两个**全角色**查询（无对应角色时返回空）：
       ```

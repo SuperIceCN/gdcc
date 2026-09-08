@@ -57,6 +57,11 @@ public final class CGenHelper {
     private final @NotNull OperatorResolver operatorResolver = new OperatorResolver();
     private final @NotNull Set<BindingData> bindingDataSet = new HashSet<>();
     private final boolean hasCoroutineFunctions;
+    /// Module-wide GDCC vtable plan, computed eagerly so inheritance/signature conflicts fail
+    /// fast at helper construction. Production registers the whole module before this point;
+    /// directly constructed fixtures with incomplete registries fall back to slotless planning
+    /// under the planner's tolerance rule.
+    private final @NotNull CVtablePlanner vtablePlanner;
 
     public CGenHelper(@NotNull CodegenContext context, @NotNull List<? extends ClassDef> classDefs) {
         this.context = context;
@@ -66,6 +71,7 @@ public final class CGenHelper {
         this.hasCoroutineFunctions = classDefs.stream()
                 .flatMap(classDef -> classDef.getFunctions().stream())
                 .anyMatch(function -> function instanceof LirFunctionDef lirFunction && lirFunction.isCoroutine());
+        this.vtablePlanner = new CVtablePlanner(classDefs, context.classRegistry());
     }
 
     public record OperatorEvaluatorHelperSpec(
@@ -1871,6 +1877,11 @@ public final class CGenHelper {
 
     public @NotNull CodegenContext context() {
         return context;
+    }
+
+    /// Read-only module vtable plan for entry-template layout and call-site dispatch queries.
+    public @NotNull CVtablePlanner vtablePlanner() {
+        return vtablePlanner;
     }
 
     public @NotNull CBuiltinBuilder builtinBuilder() {
