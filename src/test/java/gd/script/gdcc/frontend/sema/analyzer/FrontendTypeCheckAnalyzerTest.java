@@ -23,6 +23,7 @@ import gd.script.gdcc.type.GdVoidType;
 import dev.superice.gdparser.frontend.ast.AssignmentExpression;
 import dev.superice.gdparser.frontend.ast.ForStatement;
 import dev.superice.gdparser.frontend.ast.FunctionDeclaration;
+import dev.superice.gdparser.frontend.ast.IfStatement;
 import dev.superice.gdparser.frontend.ast.Node;
 import dev.superice.gdparser.frontend.ast.Statement;
 import dev.superice.gdparser.frontend.ast.VariableDeclaration;
@@ -2037,6 +2038,53 @@ class FrontendTypeCheckAnalyzerTest {
         assertEquals(1, diagnostics.size());
         assertTrue(diagnostics.getFirst().message().contains("Local variable 'value'"));
         assertTrue(diagnostics.getFirst().message().contains("not assignable to declared slot type 'int'"));
+    }
+
+    @Test
+    void analyzeConsumesStringFormatTypedFactsAcrossInitializerConditionAndReturn() throws Exception {
+        var preparedInput = prepareTypeCheckInput("type_check_string_format.gd", """
+                class_name TypeCheckStringFormat
+                extends RefCounted
+                
+                func render(value: Variant) -> String:
+                    var text: String = "value=%s" % value
+                    if "%s" % value:
+                        return text
+                    return "%d" % 1
+                
+                func reject(value: Variant) -> void:
+                    var wrong: int = "%s" % value
+                """);
+
+        // The `%` initializer publishes a resolved String fact that downstream consumers use.
+        var renderFunction = findFunction(preparedInput.unit().ast(), "render");
+        var textInit = requireInitializerType(renderFunction.body().statements(), "text", preparedInput);
+        assertEquals(FrontendExpressionTypeStatus.RESOLVED, textInit.status());
+        assertEquals("String", textInit.publishedType().getTypeName());
+
+        // The condition root is the `%` expression itself, so type-check consumes its String fact.
+        var condition = findNodes(renderFunction, IfStatement.class, _ -> true).getFirst().condition();
+        var conditionFact = preparedInput.analysisData().expressionTypes().get(condition);
+        assertNotNull(conditionFact);
+        assertEquals(FrontendExpressionTypeStatus.RESOLVED, conditionFact.status());
+        assertEquals("String", conditionFact.publishedType().getTypeName());
+
+        // Initializer/condition/return consumption of the String result raises no findings in the
+        // legal function; assigning the String result to an int slot is rejected exactly once.
+        new FrontendTypeCheckAnalyzer().analyze(
+                preparedInput.classRegistry(),
+                preparedInput.analysisData(),
+                preparedInput.diagnosticManager()
+        );
+
+        var typeCheckDiagnostics = diagnosticsByCategory(
+                preparedInput.diagnosticManager().snapshot(),
+                "sema.type_check"
+        );
+        assertEquals(1, typeCheckDiagnostics.size());
+        assertTrue(typeCheckDiagnostics.getFirst().message().contains("Local variable 'wrong'"));
+        assertTrue(typeCheckDiagnostics.getFirst().message().contains("not assignable to declared slot type 'int'"));
+        assertTrue(typeCheckDiagnostics.getFirst().message().contains("String"));
     }
 
     @Test

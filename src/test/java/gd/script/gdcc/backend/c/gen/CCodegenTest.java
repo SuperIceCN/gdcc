@@ -2583,6 +2583,47 @@ public class CCodegenTest {
     }
 
     @Test
+    public void rendersStringFormatEvaluatorHelpersForUntypedAndTypedArrayRightOperands() {
+        var workerClass = new LirClassDef("Worker", "RefCounted");
+        var func = new LirFunctionDef("string_format_eval");
+        func.setReturnType(GdVoidType.VOID);
+        func.createAndAddVariable("fmt", GdStringType.STRING);
+        func.createAndAddVariable("args", new GdArrayType(GdVariantType.VARIANT));
+        func.createAndAddVariable("typed_args", new GdArrayType(GdIntType.INT));
+        func.createAndAddVariable("plain_result", GdStringType.STRING);
+        func.createAndAddVariable("typed_result", GdStringType.STRING);
+
+        var entry = new LirBasicBlock("entry");
+        entry.appendInstruction(new BinaryOpInsn("plain_result", GodotOperator.MODULE, "fmt", "args"));
+        entry.appendInstruction(new BinaryOpInsn("typed_result", GodotOperator.MODULE, "fmt", "typed_args"));
+        entry.appendInstruction(new ReturnInsn(null));
+        func.addBasicBlock(entry);
+        func.setEntryBlockId("entry");
+        workerClass.addFunction(func);
+
+        var module = new LirModule("string_format_eval_module", List.of(workerClass));
+        var classRegistry = new ClassRegistry(stringFormatApi());
+        ProjectInfo projectInfo = new ProjectInfo("test", GodotVersion.V451, Path.of(".")) {
+        };
+        var ctx = new CodegenContext(projectInfo, classRegistry);
+
+        var codegen = new CCodegen();
+        codegen.prepare(ctx, module);
+        var files = codegen.generate();
+
+        var cCode = generatedFileText(files, "entry.c");
+        var hCode = generatedFileText(files, "entry.h");
+
+        // Both helper specs (untyped and typed-array signatures) are collected and rendered;
+        // the typed variant keeps its sanitized name while hitting the plain Array metadata entry.
+        assertTrue(hCode.contains("static inline godot_String gdcc_eval_binary_module_string_array_to_string("), hCode);
+        assertTrue(hCode.contains("gdcc_eval_binary_module_string_array_int_to_string("), hCode);
+        assertTrue(hCode.contains("GDEXTENSION_VARIANT_OP_MODULE"), hCode);
+        assertTrue(cCode.contains("$plain_result = gdcc_eval_binary_module_string_array_to_string(&$fmt, &$args);"), cCode);
+        assertTrue(cCode.contains("$typed_result = gdcc_eval_binary_module_string_array_int_to_string(&$fmt, &$typed_args);"), cCode);
+    }
+
+    @Test
     public void codegenShouldFailWhenOnlySwappedMetadataExists() {
         var workerClass = new LirClassDef("Worker", "RefCounted");
         var func = new LirFunctionDef("operator_eval_swap");
@@ -3461,6 +3502,32 @@ public class CCodegenTest {
                 List.of(),
                 List.of(),
                 List.of(intBuiltin, boolBuiltin, stringBuiltin),
+                List.of(),
+                List.of(),
+                List.of()
+        );
+    }
+
+    private static ExtensionAPI stringFormatApi() {
+        var stringBuiltin = new ExtensionBuiltinClass(
+                "String",
+                false,
+                List.of(
+                        new ExtensionBuiltinClass.ClassOperator("%", "Array", "String")
+                ),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of()
+        );
+        return new ExtensionAPI(
+                null,
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(stringBuiltin),
                 List.of(),
                 List.of(),
                 List.of()

@@ -29,6 +29,7 @@ import gd.script.gdcc.type.GdIntType;
 import gd.script.gdcc.type.GdNilType;
 import gd.script.gdcc.type.GdObjectType;
 import gd.script.gdcc.type.GdSignalType;
+import gd.script.gdcc.type.GdStringType;
 import gd.script.gdcc.type.GdType;
 import gd.script.gdcc.type.GdVariantType;
 import gd.script.gdcc.type.GdVoidType;
@@ -706,6 +707,17 @@ public final class FrontendExpressionSemanticSupport {
         var specialReturnType = resolveBinarySpecialReturnType(operator, publishedLeftType, publishedRightType);
         if (specialReturnType != null) {
             return FrontendExpressionType.resolved(specialReturnType);
+        }
+
+        // String `%` formatting with a runtime-open right operand always yields String:
+        // Godot's `do_mod` for a String left operand and every `String % T` metadata entry
+        // return String. This rule sits directly in front of the generic runtime-open
+        // branch and requires a runtime-open right operand, so the exact-match lookup
+        // below stays fail-closed for named object subclasses and `null`.
+        if (operator == GodotOperator.MODULE
+                && publishedLeftType instanceof GdStringType
+                && isRuntimeOpenOperatorOperand(rightOperandType, publishedRightType)) {
+            return FrontendExpressionType.resolved(GdStringType.STRING);
         }
 
         if (isRuntimeOpenOperatorOperand(leftOperandType, publishedLeftType)

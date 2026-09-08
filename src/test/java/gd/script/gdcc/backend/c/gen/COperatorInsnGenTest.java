@@ -998,6 +998,63 @@ class COperatorInsnGenTest {
         assertTrue(ex.getMessage().contains("Binary operator metadata is missing for signature (int, IN, Dictionary[String, int])"), ex.getMessage());
     }
 
+    @Test
+    @DisplayName("MODULE(String, Array) should resolve the builtin evaluator helper for string formatting")
+    void moduleStringArrayUsesBuiltinEvaluator() {
+        var body = generateBody(
+                stringFormatApi(),
+                new BinaryOpInsn("result", GodotOperator.MODULE, "left", "right"),
+                List.of(
+                        new VariableSpec("left", GdStringType.STRING, false),
+                        new VariableSpec("right", new GdArrayType(GdVariantType.VARIANT), false),
+                        new VariableSpec("result", GdStringType.STRING, false)
+                )
+        );
+
+        assertTrue(body.contains("$result = gdcc_eval_binary_module_string_array_to_string(&$left, &$right);"), body);
+        assertFalse(body.contains("godot_variant_evaluate"), body);
+    }
+
+    @Test
+    @DisplayName("MODULE(String, Array[int]) should keep the sanitized typed helper name and normalized metadata hit")
+    void moduleStringTypedArrayKeepsSanitizedHelperName() {
+        var body = generateBody(
+                stringFormatApi(),
+                new BinaryOpInsn("result", GodotOperator.MODULE, "left", "right"),
+                List.of(
+                        new VariableSpec("left", GdStringType.STRING, false),
+                        new VariableSpec("right", new GdArrayType(GdIntType.INT), false),
+                        new VariableSpec("result", GdStringType.STRING, false)
+                )
+        );
+
+        // The helper name is sanitized from `getTypeName()` while metadata matching normalizes
+        // `Array[int]` to the plain `Array` entry. `godot_TypedArray(T)` is an alias of
+        // `godot_Array`, so passing the typed array pointer to this evaluator is ABI-safe.
+        assertTrue(body.contains("$result = gdcc_eval_binary_module_string_array_int_to_string(&$left, &$right);"), body);
+        assertFalse(body.contains("godot_variant_evaluate"), body);
+    }
+
+    @Test
+    @DisplayName("MODULE(String, Variant) should route through variant_evaluate and unpack to String with runtime type check")
+    void moduleStringVariantUsesVariantEvaluateWithUnpackTypeCheck() {
+        var body = generateBody(
+                emptyApi(),
+                new BinaryOpInsn("result", GodotOperator.MODULE, "left", "right"),
+                List.of(
+                        new VariableSpec("left", GdStringType.STRING, false),
+                        new VariableSpec("right", GdVariantType.VARIANT, false),
+                        new VariableSpec("result", GdStringType.STRING, false)
+                )
+        );
+
+        assertTrue(body.contains("godot_variant_evaluate(GDEXTENSION_VARIANT_OP_MODULE"), body);
+        assertTrue(body.contains("gdcc_check_variant_type_builtin(&__gdcc_tmp_op_eval_result_"), body);
+        assertTrue(body.contains("GDEXTENSION_VARIANT_TYPE_STRING"), body);
+        assertTrue(body.contains("$result = godot_new_String_with_Variant(&__gdcc_tmp_op_eval_result_"), body);
+        assertTrue(body.contains("variant_evaluate type check failed for operator 'MODULE': expected String"), body);
+    }
+
     private @NotNull String generateBody(@NotNull ExtensionAPI api,
                                          @NotNull LirInstruction instruction,
                                          @NotNull List<VariableSpec> variableSpecs) {
@@ -1384,6 +1441,32 @@ class COperatorInsnGenTest {
                 List.of(),
                 List.of(),
                 List.of(intBuiltin),
+                List.of(),
+                List.of(),
+                List.of()
+        );
+    }
+
+    private @NotNull ExtensionAPI stringFormatApi() {
+        var stringBuiltin = new ExtensionBuiltinClass(
+                "String",
+                false,
+                List.of(
+                        new ExtensionBuiltinClass.ClassOperator("%", "Array", "String")
+                ),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of()
+        );
+        return new ExtensionAPI(
+                null,
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(stringBuiltin),
                 List.of(),
                 List.of(),
                 List.of()

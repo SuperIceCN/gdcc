@@ -184,6 +184,89 @@ class FrontendLoweringBodyInsnPassTest {
         );
     }
 
+    @Test
+    void runLowersStringFormatBinaryIntoModuleInsnAfterContainerConstruction() throws Exception {
+        var prepared = prepareContext(
+                "body_insn_string_format.gd",
+                """
+                        class_name BodyInsnStringFormat
+                        extends RefCounted
+                        
+                        func ping(name: String, hp: int) -> String:
+                            return "%s=%d" % [name, hp]
+                        """,
+                Map.of("BodyInsnStringFormat", "RuntimeBodyInsnStringFormat"),
+                true
+        );
+        var pingContext = requireContext(
+                prepared.context().requireFunctionLoweringContexts(),
+                FunctionLoweringContext.Kind.EXECUTABLE_BODY,
+                "RuntimeBodyInsnStringFormat",
+                "ping"
+        );
+
+        new FrontendLoweringBodyInsnPass().run(prepared.context());
+
+        var formatInsn = requireOnlyInstruction(pingContext.targetFunction(), BinaryOpInsn.class);
+        var containerInsn = requireOnlyInstruction(pingContext.targetFunction(), ConstructContainerLiteralInsn.class);
+        var literalInsn = requireOnlyInstruction(pingContext.targetFunction(), LiteralStringInsn.class);
+        var returnInsn = requireOnlyInstruction(pingContext.targetFunction(), ReturnInsn.class);
+        var function = pingContext.targetFunction();
+
+        assertAll(
+                () -> assertFalse(prepared.diagnostics().hasErrors()),
+                () -> assertEquals(GodotOperator.MODULE, formatInsn.op()),
+                () -> assertEquals(2, containerInsn.operands().size()),
+                // The array literal is built first and consumed as the right operand of MODULE.
+                () -> assertEquals(literalInsn.resultId(), formatInsn.leftId()),
+                () -> assertEquals(containerInsn.resultId(), formatInsn.rightId()),
+                () -> assertEquals(formatInsn.resultId(), returnInsn.returnValueId()),
+                // Slot types keep the MODULE(String, Array) -> String contract the backend relies on.
+                () -> assertEquals(GdStringType.STRING, requireVariableType(function, formatInsn.leftId())),
+                () -> assertEquals(
+                        new GdArrayType(GdVariantType.VARIANT),
+                        requireVariableType(function, formatInsn.rightId())
+                ),
+                () -> assertEquals(GdStringType.STRING, requireVariableType(function, formatInsn.resultId()))
+        );
+    }
+
+    @Test
+    void runLowersStringFormatCompoundAssignmentOnLocalIntoModuleAndAssign() throws Exception {
+        var prepared = prepareContext(
+                "body_insn_string_format_compound.gd",
+                """
+                        class_name BodyInsnStringFormatCompound
+                        extends RefCounted
+                        
+                        func ping(args: Array) -> String:
+                            var label := "hp=%s"
+                            label %= args
+                            return label
+                        """,
+                Map.of("BodyInsnStringFormatCompound", "RuntimeBodyInsnStringFormatCompound"),
+                true
+        );
+        var pingContext = requireContext(
+                prepared.context().requireFunctionLoweringContexts(),
+                FunctionLoweringContext.Kind.EXECUTABLE_BODY,
+                "RuntimeBodyInsnStringFormatCompound",
+                "ping"
+        );
+
+        new FrontendLoweringBodyInsnPass().run(prepared.context());
+
+        var instructions = allInstructions(pingContext.targetFunction());
+        var compoundInsn = requireOnlyInstruction(pingContext.targetFunction(), BinaryOpInsn.class);
+        var assignSources = assignSourcesByTarget(instructions);
+
+        assertAll(
+                () -> assertFalse(prepared.diagnostics().hasErrors()),
+                () -> assertEquals(GodotOperator.MODULE, compoundInsn.op()),
+                () -> assertEquals(compoundInsn.resultId(), assignSources.get("label"))
+        );
+    }
+
     /// An untyped function is Variant-returning, so an implicit fallthrough without an explicit
     /// return must not emit a value-less terminator (the backend rejects those for non-void
     /// functions): the stop block materializes a Variant nil slot and returns it.
