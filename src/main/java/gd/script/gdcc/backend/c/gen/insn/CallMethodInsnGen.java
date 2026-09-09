@@ -269,10 +269,12 @@ public final class CallMethodInsnGen implements CInsnGen<CallMethodInsn> {
                                      @NotNull CBodyBuilder.TempVar vtRecv) {
     }
 
-    /// Shared exact-signature call flow for `CALL_METHOD`/`CALL_STATIC_METHOD`: default completion,
-    /// vararg collection, void/result handling and engine-usage recording. `receiverVar` is null
-    /// exactly on the static route; `validateFixedArgsAndCompleteDefaults` enforces the receiver
-    /// contract against `resolved.isStatic()`.
+    /// Shared exact-signature call flow for `CALL_METHOD`/`CALL_STATIC_METHOD`/`CALL_SUPER_METHOD`:
+    /// default completion, vararg collection, void/result handling and engine-usage recording.
+    /// `receiverVar` is null exactly on the static route; `validateFixedArgsAndCompleteDefaults`
+    /// enforces the receiver contract against `resolved.isStatic()`. `CALL_SUPER_METHOD` always
+    /// takes the direct path (`indirect == null`): super names a fixed ancestor implementation and
+    /// must never dispatch through the vtable, so do NOT add vtable gating to this shared flow.
     static void emitResolvedCall(@NotNull CBodyBuilder bodyBuilder,
                                  @Nullable String resultId,
                                  @Nullable LirVariable receiverVar,

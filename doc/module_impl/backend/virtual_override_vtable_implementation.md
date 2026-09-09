@@ -276,10 +276,11 @@ void <C>_class_call_virtual_with_data(GDExtensionClassInstancePtr p_instance, ..
 新增 `CallSuperMethodInsnGen implements CInsnGen<CallSuperMethodInsn>`（注册进 `CCodegen.INSN_GENS`）：
 
 1. **词法 super 语义不变量**：GDScript 的 `super` 相对**词法当前类**（而非 receiver 静态类型）。指令的 object 操作数静态类型必须等于当前正在生成的类（`bodyBuilder.clazz()`，即 `$self`），否则 `invalidInsn`。解析起点取 `bodyBuilder.clazz().getSuperName()`（词法父类），不依赖 receiver 变量类型的父类。
-2. `BackendMethodCallResolver.resolveSuper(bodyBuilder, methodName, argVars)`（新增）：
+2. `BackendMethodCallResolver.resolveSuper(bodyBuilder, receiverVar, methodName, argVars)`（新增；2026-09-09 实施时签名补入 `receiverVar`，词法 self 校验收敛在 resolver 内对所有调用方强制）：
+   - receiver 静态类型必须恰为 `bodyBuilder.clazz()`（词法 self 不变量），否则 `invalidInsn`；
    - `bodyBuilder.clazz()` 的 `superName` 为空 → `invalidInsn`（无父类）；
    - 以 `GdObjectType(superName)` 为起点调用 `ScopeMethodResolver.resolveInstanceMethod(...)`——owner 是"最近的祖先实现"（GDCC 祖父类也可能成为 owner），即 super 语义；
-   - `DynamicFallback` → `invalidInsn`（super 调用必须静态可解析）；`Failed` → `invalidInsn`；
+   - `DynamicFallback` → `invalidInsn`（super 调用必须静态可解析）；`Failed` → `invalidInsn`；解析到 static 方法 → `invalidInsn`（super 是实例语义，无 static 形态，不像 CALL_METHOD 仅告警）；
    - `super._init` 不走本指令（`_init` 被 resolver 拒绝；构造路径仍是 `entry.c.ftl:294-313` 的递归 constructor），文档注明。
 3. 生成：
    - owner GDCC → `emitResolvedCall` 直接调用 `<Owner>_<m>`，**绕过 vtable**（即使该方法 polymorphic——super 语义要求固定父类实现）；receiver（`$self`）经既有 `renderReceiverValue` 沿 `_super` 链 upcast 到 owner；
@@ -471,6 +472,13 @@ void <C>_class_call_virtual_with_data(GDExtensionClassInstancePtr p_instance, ..
     - 缺参补全、vararg、void/结果写入与 `call_method` 同规则；
     - LIR 文本解析 round-trip 断言（`ParsedLirInstruction` 已有解析，补缺）。
 - 验收：`script/run-gradle-targeted-tests.sh --tests CallSuperMethodInsnGenTest,CConstructInsnGenTest` 全绿。
+- 实施回填（2026-09-09，已完成）：
+    - `BackendMethodCallResolver.resolveSuper(bodyBuilder, receiverVar, methodName, argVars)`：词法 super 不变量在 resolver 内强制（receiver 静态类型必须恰为 `bodyBuilder.clazz()`，解析起点固定为其声明 `getSuperName()`，superName 空白 → `invalidInsn`），复用共享 `ScopeMethodResolver.resolveInstanceMethod` 沿父链静态解析最近祖先实现；`DynamicFallback` 与 `Failed`（含 `_init` 的 constructor-route 拒绝）一律转为 `invalidInsn`（D2）。
+    - 新增 `CallSuperMethodInsnGen`（注册进 `CCodegen.INSN_GENS`，位于 `CallMethodInsnGen` 之后）：GDCC/ENGINE owner 复用 `CallMethodInsnGen.emitResolvedCall`/`emitCoroutineStartCall` 共享发射器——GDCC owner 直调 `<Owner>_<method>`（**永不查 `isPolymorphicCall`、不走 vtable**，即使目标方法持有 polymorphic slot），engine owner 走 exact helper，coroutine owner 直调 start thunk（static coroutine 异常 IR 守卫与 CALL_METHOD 一致）；receiver 经既有 `renderReceiverValue` 沿 `_super` 链安全 upcast 到 owner，缺参补全/vararg/void/结果写入零差异复用。
+    - `CConstructInsnGenTest.unregisteredOpcodeFailsDispatchInsteadOfSkipping` 探针按计划改用 `GET_CLASS_NAME`（该 opcode 有 LIR 解析但无 CInsnGen）。
+    - `gdcc_low_ir.md` §call_super_method 措辞已修订：词法 super 起点、object 必须为当前类 self、静态不可解析 = 编译期错误（D2）、`super._init` 不落此 opcode、coroutine ABI 引用 call_method。
+- 测试回填：`CallSuperMethodInsnGenTest`（16 例：GDCC 父方法直调且断言**无** `class_vtable`/`vt_recv` 形态、祖父 owner 解析、engine exact helper、coroutine start thunk 直调、结果写入、owner default_value_func 缺参补全、vararg 尾部打包、inner class 父类 canonical 命名双层锚定（C 符号保留 `__sub__`、fat helper 用 `cIdentifier` 单层下划线），及词法不变量违反/无父类/父链不可解析（`RECEIVER_METADATA_UNKNOWN`）/已知父类缺方法（`METHOD_MISSING`）/static 父方法（instance-only 守卫）/`super._init`/void 带 resultId/coroutine 缺 result 八条负例）；round-trip 断言按既有 lir 合同测试惯例独立为 `CallSuperMethodInsnContractTest`（11 例，含序列化形态与负例解析）。验收命令加 `CallSuperMethodInsnContractTest` 后全绿；`gd.script.gdcc.backend.c.gen.*` 全包回归全绿。
+- 审阅回填：`review-expert-a` 初审结论**通过**，无高风险；2 条中风险已修复——(1) `gdcc_low_ir.md` 的 `compiler::GdccCoroState` 生产者集合扩为 `call_method`/`call_super_method`/`call_static_method`（call_method 小节与 §Coroutine Instructions 两处同步）；(2) super 解析到 static 方法由静默丢 receiver 改为 `invalidInsn`（super 是实例语义，无 static 形态，比 CALL_METHOD 的 warn 更严）。低风险已处理：§2.5 设计签名补 `receiverVar` 实参并记录 static 守卫；`emitResolvedCall` 注释承认第三调用方并冻结"super 必须 `indirect == null`、禁止在本共享流加 vtable 闸门"；DynamicFallback 诊断消息改带 `DynamicFallbackReason`；测试补强（Ghost 断言精确化 + 三个新锚定用例）。engine virtual（如 `super._ready()`）经 exact helper 的 MethodBind 限制属 CALL_METHOD 既有限制被继承，非本步缺陷，不在此处理。
 
 ### Step 6：文档修订与全量回归
 

@@ -571,9 +571,9 @@ $<result_id>? = call_global "<function_name>" $<arg1_id> $<arg2_id> ...
 Calls a method on an Object by method name.
 
 When the callee is an `is_coroutine="true"` GDCC instance method, the result is mandatory
-and is typed `compiler::GdccCoroState` (see [await](#await)); `call_method` on an instance
-coroutine and `call_static_method` on a static coroutine are the only producers of
-`compiler::GdccCoroState` values.
+and is typed `compiler::GdccCoroState` (see [await](#await)); `call_method` /
+`call_super_method` on an instance coroutine and `call_static_method` on a static coroutine
+are the only producers of `compiler::GdccCoroState` values.
 
 ```
 $<result_id>? = call_method "<method_name>" $<object_id> $<arg1_id> $<arg2_id> ...
@@ -581,8 +581,15 @@ $<result_id>? = call_method "<method_name>" $<object_id> $<arg1_id> $<arg2_id> .
 
 #### call_super_method
 
-Calls a super method on an Object by method name.
-If the method does not exist in the super class, it will result in a runtime error.
+Calls a super method on an Object by method name. `super` is lexical: resolution starts at the
+declared super class of the class whose body contains the instruction, and `$<object_id>` must be
+that class's own `self` — its static type must equal the containing class exactly. The nearest
+ancestor implementation is selected statically at compile time; if the containing class has no
+super class or the method cannot be statically resolved from the super chain, compilation fails
+(no runtime fallback). `super._init` never lowers to this opcode — constructor chaining follows
+the dedicated construction sequence. When the resolved callee is an `is_coroutine="true"` GDCC
+instance method, the `call_method` coroutine ABI applies: the call targets the coroutine-start
+thunk and the result is a mandatory `compiler::GdccCoroState` variable.
 
 ```
 $<result_id>? = call_super_method "<method_name>" $<object_id> $<arg1_id> $<arg2_id> ...
@@ -632,10 +639,10 @@ Rules:
   - `Signal` operand: one-shot signal wait (`gdcc_coro_await_signal`).
   - `compiler::GdccCoroState` operand: static coroutine-call path
     (`gdcc_coro_await_state` on the hidden state object). This compiler-only type is the
-    result type of every `call_method` whose callee is an `is_coroutine="true"` GDCC
-    instance method, and of every `call_static_method` whose callee is an
-    `is_coroutine="true"` GDCC static method (see the ABI clause below) — such calls are
-    the only producers of `compiler::GdccCoroState` values.
+    result type of every `call_method` / `call_super_method` whose callee is an
+    `is_coroutine="true"` GDCC instance method, and of every `call_static_method` whose
+    callee is an `is_coroutine="true"` GDCC static method (see the ABI clause below) — such
+    calls are the only producers of `compiler::GdccCoroState` values.
   - `Variant` operand: runtime dispatch (`gdcc_coro_await_dynamic`).
 - An operand that is neither `Signal`-typed nor `Variant`-typed nor
   `compiler::GdccCoroState`-typed is invalid: backend validation fails fast with
@@ -646,8 +653,8 @@ Rules:
   always returns the OWNED state object reference (`godot_Object*`; on synchronous
   completion the state object is already `done`), and the ClassDB call/ptrcall wrappers that
   invoke the start thunk and keep the no-observable-state fast path internally. A
-  `call_method` / `call_static_method` on such a callee calls the start thunk and **must**
-  declare a result
+  `call_method` / `call_super_method` / `call_static_method` on such a callee calls the
+  start thunk and **must** declare a result
   variable (backend fails fast with `InvalidInsnException` otherwise); the result variable
   is declared with the compiler-only type `compiler::GdccCoroState` (C storage
   `godot_Object*`), so the state reference is an ordinary typed LIR value with normal
