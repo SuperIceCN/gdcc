@@ -8,8 +8,10 @@ import gd.script.gdcc.gdextension.ExtensionApiLoader;
 import gd.script.gdcc.lir.LirBasicBlock;
 import gd.script.gdcc.lir.LirClassDef;
 import gd.script.gdcc.lir.LirFunctionDef;
+import gd.script.gdcc.lir.LirInstruction;
 import gd.script.gdcc.lir.LirModule;
 import gd.script.gdcc.lir.LirParameterDef;
+import gd.script.gdcc.lir.insn.CallMethodInsn;
 import gd.script.gdcc.lir.insn.ReturnInsn;
 import gd.script.gdcc.scope.ClassRegistry;
 import gd.script.gdcc.type.GdIntType;
@@ -324,6 +326,56 @@ public class CVtableCodegenTest {
 
     // ==== Fixture helpers ====
 
+    @Test
+    @DisplayName("three-level chain with a mid-layer call site: end-to-end vtable dispatch (Step 4, §2.6)")
+    void threeLevelChainWithMidLayerCallSiteGeneratesVtableDispatchEndToEnd() throws Exception {
+        var classA = newClass("GeA", "Node", newEchoIntMethod("GeA", "foo"));
+        var classB = newClass("GeB", "GeA", newEchoIntMethod("GeB", "foo"));
+        var classC = newClass("GeC", "GeB", newEchoIntMethod("GeC", "foo"));
+        var hostClass = newClass("GeHost", "Node", newCallFooOnMidMethod());
+
+        var files = generate(classA, classB, classC, hostClass);
+        var cCode = generatedFileText(files, "entry.c");
+        var fatPtrHeader = generatedFileText(files, "object_fat_ptr_types.h");
+
+        // Call site (owner GeB != introducer GeA): the receiver is materialized once as the
+        // introducer fat self, then callee + first arg both read the temp (§2.6).
+        var callSiteBody = resolveFunctionBodyByPrefix(cCode, "GeHost_call_foo_on_mid(");
+        assertOrdered(callSiteBody,
+                "gdcc_GeA_fat_ptr __gdcc_tmp_vt_recv_0 = gdcc_GeB_fat_ptr_upcast_to_GeA($child);",
+                "GeA_class_vtable(__gdcc_tmp_vt_recv_0.ptr)->m_foo(__gdcc_tmp_vt_recv_0, $value)");
+        assertFalse(callSiteBody.contains("GeB_foo("), callSiteBody);
+        assertFalse(callSiteBody.contains("GeA_foo("), callSiteBody);
+
+        // The slot member read at the call site is backed by real per-class tables (Step 2
+        // integration): B and C override foo through trampolines in their own instances.
+        assertContainsAll(cCode,
+                "static const gdcc_GeA_vtable gdcc_GeA_vtable_inst = { .m_foo = GeA_foo };",
+                "static const gdcc_GeA_vtable gdcc_GeB_vtable_inst = { .m_foo = gdcc_GeB_vslot_foo };",
+                "static const gdcc_GeA_vtable gdcc_GeC_vtable_inst = { .m_foo = gdcc_GeC_vslot_foo };");
+
+        // The receiver→introducer upcast helper flows through the regular collector channel
+        // (§2.6 item 5): no call-site-specific collection mechanism is needed.
+        assertTrue(fatPtrHeader.contains("gdcc_GeB_fat_ptr_upcast_to_GeA("), fatPtrHeader);
+    }
+
+    /// `call_foo_on_mid(child: GeB, value: int) -> int`: mid-typed receiver polymorphic call site —
+    /// resolved owner is GeB while the slot introducer is GeA.
+    private static @NotNull LirFunctionDef newCallFooOnMidMethod() {
+        var function = newInstanceMethodSkeleton("GeHost", "call_foo_on_mid", GdIntType.INT);
+        function.addParameter(new LirParameterDef("child", new GdObjectType("GeB"), null, function));
+        function.addParameter(new LirParameterDef("value", GdIntType.INT, null, function));
+        function.createAndAddVariable("result", GdIntType.INT);
+        entryOf(function).appendInstruction(new CallMethodInsn(
+                "result",
+                "foo",
+                "child",
+                List.of(new LirInstruction.VariableOperand("value"))
+        ));
+        entryOf(function).setTerminator(new ReturnInsn("result"));
+        return function;
+    }
+
     private static @NotNull LirClassDef newClass(@NotNull String name, @NotNull String superName,
                                                  @NotNull LirFunctionDef... functions) {
         var classDef = new LirClassDef(name, superName);
@@ -407,7 +459,9 @@ public class CVtableCodegenTest {
     }
 
     /// Extracts the body between the braces following a prefix (function definitions, struct
-    /// blocks, typedef blocks alike).
+    /// blocks, typedef blocks alike). Function prefixes rely on the entry.c emission contract
+    /// that user method functions are DEFINED without preceding in-file prototypes (prototypes
+    /// live in entry.h), so the first prefix match is always the definition.
     private static @NotNull String resolveFunctionBodyByPrefix(@NotNull String code, @NotNull String signaturePrefix) {
         return resolveBlockBody(code, signaturePrefix);
     }

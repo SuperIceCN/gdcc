@@ -307,7 +307,7 @@ void <C>_class_call_virtual_with_data(GDExtensionClassInstancePtr p_instance, ..
 - `resolved.isStatic()`（实例语法调静态方法，现有 warn 路径）不查 vtable。
 - ENGINE / BUILTIN / 动态路由完全不变。
 
-**CBodyBuilder 新增间接调用 API**：`callAssignIndirect(target, calleeExpr, returnType, args, varargs)` / `callVoidIndirect(...)`。与 `callAssign/callVoid` 的差异：不做 `recordUsedGodotBindingCall`（callee 是表达式而非 binding 符号，§1.3），对象返回按内部 fat-ptr 产物处理（vtable 槽指向内部 GDCC 函数，等价于直接 GDCC 调用的 `PtrKind.FAT_PTR` 路径），其余 temp 声明/析构、discard 语义保持一致。
+**CBodyBuilder 新增间接调用 API**（2026-09-09 修订：callee 构造内移，替代原 `callAssignIndirect(target, calleeExpr, ...)` / `callVoidIndirect(...)` 形态）：`callAssignVtableSlot(target, slot, vtRecv, returnType, args, varargs)` / `callVoidVtableSlot(slot, vtRecv, args, varargs)`。callee 表达式（`<I>_class_vtable(<vtRecv>.ptr)->m_<method>`）由 CBodyBuilder **内部**经 `CGenHelper.renderVtableSlotCalleeExpr` 渲染，并 fail-fast 校验 `vtRecv` 必须承载 slot 引入者 fat 类型且调用首参与 `vtRecv` 为同一对象——调用者只提供 slot 与物化 temp，callee 与首参由此单一来源派生。与 `callAssign/callVoid` 的差异：不做 `recordUsedGodotBindingCall`（callee 是表达式而非 binding 符号，§1.3），对象返回按内部 fat-ptr 产物处理（vtable 槽指向内部 GDCC 函数，等价于直接 GDCC 调用的 `PtrKind.FAT_PTR` 路径），其余 temp 声明/析构、discard 语义保持一致。
 
 ### 2.7 命名与符号冲突注册
 
@@ -435,7 +435,22 @@ void <C>_class_call_virtual_with_data(GDExtensionClassInstancePtr p_instance, ..
 
 ### Step 4：CALL_METHOD 调用点间接分发（R4）
 
-- 改动：`CBodyBuilder.callAssignIndirect/callVoidIndirect`（§2.6）、`CallMethodInsnGen.emitKnownSignatureCall` 在 coroutine 分流前接入 `isPolymorphicCall` 判定与 receiver 物化（按 slot 引入者类型）、`CGenHelper` 渲染 accessor/callee 表达式。
+- **实施状态：已完成（2026-09-09）**。
+    - 验收：`script/run-gradle-targeted-tests.sh --tests CallMethodInsnGenTest,CallMethodInsnGenEngineInheritanceTest,CCodegenTest,CVtableCodegenTest` 全绿（engine 继承 runtime 2 用例实跑非 skip）；回归 `gd.script.gdcc.backend.c.gen.*` 全包及 `GdScriptUnitTestCompileRunnerTest`、`GdScriptEngineVirtualOverrideRuntimeTest` 全绿。
+    - 实施要点回填：
+        - `CBodyBuilder`：`callVoid`/`callAssign` 主体提取为私有 `emitVoidCall`/`emitAssignCall`；新增 `callVoidVtableSlot`/`callAssignVtableSlot`（2026-09-09 方案 A 重构，替代初版 `callVoidIndirect`/`callAssignIndirect`）——签名收 `(slot, vtRecv)` 结构化参数，callee 表达式由私有 `requireVtableSlotCalleeExpr(slot, vtRecv, args)` 内部渲染（委托 `CGenHelper.renderVtableSlotCalleeExpr`），并 fail-fast 校验 vtRecv 承载 slot 引入者 fat 类型且首参与 vtRecv 为同一对象；与直调共享同一发射体，仅跳过 `recordUsedGodotBindingCall`（callee 是 vtable 槽成员表达式而非 `godot_*` binding 符号，§1.3）。对象返回自然落入 `resolveCallResultPtrKind` 的 FAT_PTR 分支（callee 表达式不匹配 `godot_` 前缀），与直接 GDCC 调用一致；temp 声明/析构、vararg 尾部、discard 语义零变化（重构前后生成输出逐字相同，全量 golden 零 diff 通过）。
+        - `CGenHelper` 新增三方法（vtable 渲染区段）：`isPolymorphicCall(GdType, String)`（仅 GdObjectType 委托 planner，唯一合法闸门）、`findVtableSlot`（薄委托，永不当闸门）、`renderVtableSlotCalleeExpr`（`<I>_class_vtable(<recvPtrExpr>)->m_<method>`，accessor 与槽成员同在引入者层段，无 `->_super` 导航）。
+        - `CallMethodInsnGen.emitKnownSignatureCall`：闸门插在 coroutine 分流**之前**，条件 `mode()==GDCC && !isStatic() && helper.isPolymorphicCall(receiverVar.type(), methodName)`；新增 `emitPolymorphicCall`——`findVtableSlot` 取引入者（空 → invalidInsn 钉 planner 不变量），`renderReceiverValue` 复用既有安全 upcast 把 receiver 物化为引入者 fat self temp（`__gdcc_tmp_vt_recv_N`，非持有引用故无需 destroy）；私有 record `IndirectCallShape(slot, vtRecv)` 作为单一来源贯通 `emitResolvedCall`/`emitCoroutineStartCall` 的间接变体（callee 由 CBodyBuilder 从 slot+vtRecv 派生、首参为 vtRecv，其余规则不变；coroutine 结果仍 `compiler::GdccCoroState`）。
+        - `validateFixedArgsAndCompleteDefaults` 新增 `receiverArgOverride` 参数：仅替换调用的首参，实例 `default_value_func` 仍收原始 receiverVar 按 owner 类型渲染（缺省参数属于静态解析出的 owner 签名）。
+        - upcast helper 收集（§2.6 第 5 条）：无需新机制——receiver 静态类型与引入者类型都经模块类/变量类型进入 `CObjectFatPtrCollector` 既有通道，端到端 golden 已断言 `object_fat_ptr_types.h` 含 `gdcc_GeB_fat_ptr_upcast_to_GeA(`。
+    - 既有断言更新清单：无（`CCodegenTest`/`CVtableCodegenTest`/`CallMethodInsnGenTest` 全量零 diff——闸门仅在"receiver 真后代覆写"时命中，既有 golden 无此形态）。
+    - 测试锚定回填（正反对照）：
+        - `CallMethodInsnGenTest`：polymorphic 命中 → `VtBase_class_vtable(__gdcc_tmp_vt_recv_0.ptr)->m_foo(__gdcc_tmp_vt_recv_0);` 且无 `VtBase_foo(`/`VtDerived_foo(`；三层链 mid 型 receiver → 物化为 `gdcc_VtRoot_fat_ptr` 且经 `gdcc_VtMid_fat_ptr_upcast_to_VtRoot`，无 `VtMid_foo(`；两层最终覆写者 → `VtFinal_foo($child);` 且无 `_class_vtable(`/`vt_recv`（去虚锚点）；GDCC static 经实例语法（后代有同名实例方法）→ warn + `VtStaticBase_make();` 直调且无 vtable 形态（静态闸门锚点）；polymorphic coroutine → `$state = CoroRoot_class_vtable(...)->m_fire(...)`，无 `CoroRoot_fire__coro_start(`，且 `gdcc_coro_state_slot_destroy` 先于写入（slot-write 顺序不变）。
+        - `CVtableCodegenTest.threeLevelChainWithMidLayerCallSiteGeneratesVtableDispatchEndToEnd`：端到端 golden——中间层调用点间接形态（`assertOrdered` 物化→调用）+ 三层实例表 trampoline 条目 + `object_fat_ptr_types.h` upcast helper 收集可见性 + 调用点无 `GeB_foo(`/`GeA_foo(` 反例。
+        - `CallMethodInsnGenEngineInheritanceTest.callMethodPolymorphicVtableDispatchShouldWorkInRealGodot`：Zig+Godot 实跑单测五场景——root 型持有 leaf/mid/root 实例分别分派 3/2/1（R4 主锚点）、mid 型持有 leaf 分派 3（owner≠introducer 实跑）、leaf 型直调返 3（去虚）、pass-through 链 A 型持有 C/B 实例分派 30/10（共享表值不空解引用、B 无任何 vtable 符号）、兄弟分支 plain 型直调 `GDSibBaseWorker_baz(...)` 返 100（slot 存在但调用点不间接）；entry.c 函数体级正反断言 + GDScript 分场景独立错误消息。
+    - 审阅回填：`review-expert-a` 审阅结论**通过**，无高/中风险问题；3 条低风险已处理——(1) `resolveFunctionBody`/`resolveFunctionBodyByPrefix` 注释冻结"entry.c 用户方法无前置原型（原型在 entry.h），首个前缀匹配即定义"合同；(2) 补两条形态锚定 golden：`callMethodPolymorphicObjectReturnShouldKeepFatPtrResultPath`（对象返回无 `_from_raw`，锚定 FAT_PTR 内部产物路径）与 `callMethodPolymorphicDefaultValueFuncShouldKeepOwnerReceiverForDefault`（default_value_func 收原始 receiver 按 owner 渲染、vtable 首参为 vt_recv、物化顺序钉定）；(3) 文首"尚未实施"与 D4"待确认"措辞属 Step 6 文档收口范围，按计划保留。
+    - 方案 A 重构审阅回填（2026-09-09，callee 构造内移）：`review-expert-a` 结论**通过**，无高/中风险；2 条低风险已处理——私有渲染器按项目命名约定改名 `requireVtableSlotCalleeExpr`、补"首参与 vtRecv 同一对象"身份校验；§1.3 调研段过时行号留待 Step 6 统一收口。
+- 改动：`CBodyBuilder.callAssignVtableSlot/callVoidVtableSlot`（§2.6，2026-09-09 方案 A 重构：callee 构造内移）、`CallMethodInsnGen.emitKnownSignatureCall` 在 coroutine 分流前接入 `isPolymorphicCall` 判定与 receiver 物化（按 slot 引入者类型）、`CGenHelper` 渲染 accessor/callee 表达式。
 - 测试：
     - `CallMethodInsnGenTest` 新增：polymorphic 方法调用（receiver 真后代覆写）→ 出现 `<I>_class_vtable(...)->m_<m>(` 且无直接 `<O>_<m>(` 调用；**owner ≠ introducer 的间接场景用三层夹具**（`Parent(引入 foo)←Child(覆写)←Grandchild(再覆写)`，receiver 静态类型 `Child`）→ receiver 物化为 Parent fat self、首参与 callee 均为 Parent 层段类型；**两层最终覆写者**（`Parent←Child`，无第三层）→ `child.foo()` 保持直接调用 `Child_foo`（R4 括号条款的 GDCC↔GDCC 形态）；静态方法经实例语法调用 → 不查 vtable；coroutine polymorphic → 间接调 start thunk（结果仍 `compiler::GdccCoroState`）；
     - 验证 receiver→introducer 的 fat upcast helper 已被 `CObjectFatPtrCollector` 收集（该收集通道对新调用路径可见）；

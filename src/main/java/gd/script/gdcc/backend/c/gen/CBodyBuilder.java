@@ -603,18 +603,61 @@ public final class CBodyBuilder {
                                           @NotNull List<ValueRef> args,
                                           @Nullable List<ValueRef> varargs) {
         recordUsedGodotBindingCall(funcName);
+        return emitVoidCall(funcName, args, varargs);
+    }
+
+    public @NotNull CBodyBuilder callVoidVtableSlot(@NotNull CVtablePlanner.VtableSlot slot,
+                                                    @NotNull TempVar vtRecv,
+                                                    @NotNull List<ValueRef> args) {
+        return callVoidVtableSlot(slot, vtRecv, args, null);
+    }
+
+    /// Void call through a vtable slot (vtable plan §2.6). The callee expression
+    /// (`<I>_class_vtable(<vtRecv>.ptr)->m_<method>`) is constructed HERE from the slot identity
+    /// and the materialized introducer-fat receiver temp — callers never assemble callee strings.
+    /// Emission is identical to `callVoid` except that no Godot binding usage is recorded: the
+    /// callee is not a fixed `godot_*` binding symbol (godot_binding_implementation.md 使用集收集合同).
+    public @NotNull CBodyBuilder callVoidVtableSlot(@NotNull CVtablePlanner.VtableSlot slot,
+                                                    @NotNull TempVar vtRecv,
+                                                    @NotNull List<ValueRef> args,
+                                                    @Nullable List<ValueRef> varargs) {
+        return emitVoidCall(requireVtableSlotCalleeExpr(slot, vtRecv, args), args, varargs);
+    }
+
+    /// Renders the vtable-slot callee expression and pins the core invariants: `vtRecv` must be
+    /// the materialized fat self of the slot INTRODUCER's type (the accessor takes `<I>*` and the
+    /// slot function pointer's self parameter is the introducer fat type), and it must be the
+    /// call's first argument — the vtable and the receiver are always read from the same object.
+    private @NotNull String requireVtableSlotCalleeExpr(@NotNull CVtablePlanner.VtableSlot slot,
+                                                        @NotNull TempVar vtRecv,
+                                                        @NotNull List<ValueRef> args) {
+        if (!(vtRecv.type() instanceof GdObjectType vtRecvType)
+                || !vtRecvType.getTypeName().equals(slot.introducerClassName())) {
+            throw new IllegalArgumentException("vtRecv temp must carry the slot introducer fat type '" +
+                    slot.introducerClassName() + "', got '" + vtRecv.type().getTypeName() + "'");
+        }
+        if (args.isEmpty() || args.getFirst() != vtRecv) {
+            throw new IllegalArgumentException(
+                    "vtable slot call first argument must be the same vtRecv temp used for the callee");
+        }
+        return helper().renderVtableSlotCalleeExpr(slot.introducerClassName(), vtRecv.name() + ".ptr", slot.methodName());
+    }
+
+    private @NotNull CBodyBuilder emitVoidCall(@NotNull String calleeExpr,
+                                               @NotNull List<ValueRef> args,
+                                               @Nullable List<ValueRef> varargs) {
         RenderResult argsResult;
         if (varargs == null) {
-            argsResult = renderArgs(funcName, args);
+            argsResult = renderArgs(calleeExpr, args);
             emitTempDecls(argsResult.temps());
         } else {
-            argsResult = renderArgsWithVarargs(funcName, args, varargs);
+            argsResult = renderArgsWithVarargs(calleeExpr, args, varargs);
             emitTempDecls(argsResult.temps());
             if (argsResult.preCode() != null) {
                 out.append(argsResult.preCode());
             }
         }
-        out.append(funcName).append("(").append(argsResult.code()).append(");\n");
+        out.append(calleeExpr).append("(").append(argsResult.code()).append(");\n");
         emitTempDestroys(argsResult.temps());
         return this;
     }
@@ -638,37 +681,68 @@ public final class CBodyBuilder {
                                             @NotNull List<ValueRef> args,
                                             @Nullable List<ValueRef> varargs) {
         recordUsedGodotBindingCall(funcName);
+        return emitAssignCall(target, funcName, returnType, args, varargs);
+    }
+
+    public @NotNull CBodyBuilder callAssignVtableSlot(@NotNull TargetRef target,
+                                                      @NotNull CVtablePlanner.VtableSlot slot,
+                                                      @NotNull TempVar vtRecv,
+                                                      @NotNull GdType returnType,
+                                                      @NotNull List<ValueRef> args) {
+        return callAssignVtableSlot(target, slot, vtRecv, returnType, args, null);
+    }
+
+    /// Assigning call through a vtable slot (vtable plan §2.6); the callee expression is
+    /// constructed internally from `slot` + `vtRecv` (see `requireVtableSlotCalleeExpr`). No Godot
+    /// binding usage is recorded (callee is not a `godot_*` symbol). Object returns follow the
+    /// internal FAT_PTR path — vtable slots point at internal GDCC functions, never the `godot_*`
+    /// raw-producer backlog, so `resolveCallResultPtrKind` yields the same result as a direct
+    /// GDCC call; discard/temp-destroy semantics are unchanged.
+    public @NotNull CBodyBuilder callAssignVtableSlot(@NotNull TargetRef target,
+                                                      @NotNull CVtablePlanner.VtableSlot slot,
+                                                      @NotNull TempVar vtRecv,
+                                                      @NotNull GdType returnType,
+                                                      @NotNull List<ValueRef> args,
+                                                      @Nullable List<ValueRef> varargs) {
+        return emitAssignCall(target, requireVtableSlotCalleeExpr(slot, vtRecv, args), returnType, args, varargs);
+    }
+
+    private @NotNull CBodyBuilder emitAssignCall(@NotNull TargetRef target,
+                                                 @NotNull String calleeExpr,
+                                                 @NotNull GdType returnType,
+                                                 @NotNull List<ValueRef> args,
+                                                 @Nullable List<ValueRef> varargs) {
         var discardResult = target instanceof DiscardRef;
         if (!discardResult) {
             checkTargetAssignable(target);
         }
-        validateCallAssignReturnContract(funcName, returnType, target, discardResult);
+        validateCallAssignReturnContract(calleeExpr, returnType, target, discardResult);
 
         RenderResult argsResult;
         if (varargs == null) {
-            argsResult = renderArgs(funcName, args);
+            argsResult = renderArgs(calleeExpr, args);
             emitTempDecls(argsResult.temps());
 
-            var callExpr = funcName + "(" + argsResult.code() + ")";
+            var callExpr = calleeExpr + "(" + argsResult.code() + ")";
             if (discardResult) {
                 // Discarded non-void calls still need lifecycle cleanup for destroyable returns.
-                emitDiscardedCall(funcName, callExpr, returnType);
+                emitDiscardedCall(calleeExpr, callExpr, returnType);
             } else {
-                emitCallResultAssignment(target, funcName, returnType, callExpr);
+                emitCallResultAssignment(target, calleeExpr, returnType, callExpr);
             }
         } else {
-            argsResult = renderArgsWithVarargs(funcName, args, varargs);
+            argsResult = renderArgsWithVarargs(calleeExpr, args, varargs);
             emitTempDecls(argsResult.temps());
             if (argsResult.preCode() != null) {
                 out.append(argsResult.preCode());
             }
 
-            var callExpr = funcName + "(" + argsResult.code() + ")";
+            var callExpr = calleeExpr + "(" + argsResult.code() + ")";
             if (discardResult) {
                 // Discarded non-void calls still need lifecycle cleanup for destroyable returns.
-                emitDiscardedCall(funcName, callExpr, returnType);
+                emitDiscardedCall(calleeExpr, callExpr, returnType);
             } else {
-                emitCallResultAssignment(target, funcName, returnType, callExpr);
+                emitCallResultAssignment(target, calleeExpr, returnType, callExpr);
             }
         }
         emitTempDestroys(argsResult.temps());

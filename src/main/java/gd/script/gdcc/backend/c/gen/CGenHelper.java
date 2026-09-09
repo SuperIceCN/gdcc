@@ -1860,6 +1860,31 @@ public final class CGenHelper {
         return className + "_class_vtable";
     }
 
+    /// Call-site indirect-dispatch gate (vtable plan §2.1/§2.6): true only when a proper
+    /// in-module descendant of the receiver's STATIC type overrides the method. This is the
+    /// only legitimate gate — `findVtableSlot` also hits on sibling branches and final
+    /// overriders whose call sites must stay direct, so it must never be used as the gate.
+    public boolean isPolymorphicCall(@NotNull GdType receiverType, @NotNull String methodName) {
+        return receiverType instanceof GdObjectType
+                && vtablePlanner.isPolymorphicCall(receiverType.getTypeName(), methodName);
+    }
+
+    /// Slot lookup for an already-gated polymorphic call: yields the slot whose introducer may
+    /// be a strict ancestor of the resolved owner (three-level chain with a mid-typed receiver).
+    public @NotNull Optional<CVtablePlanner.VtableSlotEntry> findVtableSlot(@NotNull String ownerClassName,
+                                                                            @NotNull String methodName) {
+        return vtablePlanner.findVtableSlot(ownerClassName, methodName);
+    }
+
+    /// Call-site callee expression `<I>_class_vtable(<receiverPtrExpr>)->m_<method>` (§2.6):
+    /// accessor and slot member both live on the INTRODUCER segment, so the call site performs
+    /// no vtable `->_super` navigation.
+    public @NotNull String renderVtableSlotCalleeExpr(@NotNull String introducerClassName,
+                                                      @NotNull String receiverPtrExpr,
+                                                      @NotNull String methodName) {
+        return renderVtableAccessorName(introducerClassName) + "(" + receiverPtrExpr + ")->m_" + methodName;
+    }
+
     /// Expression reaching the root `_vtable` field from a `<C>* self`: `self->_vtable` for
     /// root classes, otherwise one `_super` hop per GDCC wrapper ancestor
     /// (`self->_super._super._vtable`). Walks the WRAPPER chain via the registry — mirroring
