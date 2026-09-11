@@ -1057,6 +1057,12 @@ public class FrontendVariableAnalyzer {
         public @NotNull FrontendASTTraversalDirective handleIdentifierExpression(
                 @NotNull IdentifierExpression identifierExpression
         ) {
+            // `super.m(...)` needs the enclosing instance receiver exactly like an explicit `self`
+            // use: the super route resolves the target from the lexical superclass but still invokes
+            // it on `self`, so the lambda must capture it.
+            if ("super".equals(identifierExpression.name())) {
+                usesExplicitSelf = true;
+            }
             var useSiteScope = scopesByAst.get(identifierExpression);
             if (useSiteScope != null) {
                 events.add(new IdentifierEvent(new FrontendLambdaCapturePlanner.IdentifierUse(

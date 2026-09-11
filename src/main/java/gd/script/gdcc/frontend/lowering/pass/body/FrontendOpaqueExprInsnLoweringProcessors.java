@@ -90,6 +90,10 @@ final class FrontendOpaqueExprInsnLoweringProcessors {
             var resultSlotId = session.resultSlotId(item);
             switch (binding.kind()) {
                 case SELF -> throw session.identifierSelfBindingContractViolation(node, "Identifier value lowering");
+                // `super` is the same `self` storage; only the enclosing call's target resolution
+                // differs, so the leaf materializes exactly like an explicit self read.
+                case SUPER ->
+                        block.appendNonTerminatorInstruction(new AssignInsn(resultSlotId, "self"));
                 case LOCAL_VAR, PARAMETER, CAPTURE ->
                         block.appendNonTerminatorInstruction(new AssignInsn(resultSlotId, binding.symbolName()));
                 case PROPERTY -> {

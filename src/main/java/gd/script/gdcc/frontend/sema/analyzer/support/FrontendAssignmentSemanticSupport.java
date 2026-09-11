@@ -664,7 +664,7 @@ public final class FrontendAssignmentSemanticSupport {
                     "Member '" + resolvedMember.memberName()
                             + "' resolves to a Callable reference and cannot be assigned"
             );
-            case CONSTANT, SINGLETON, GLOBAL_ENUM, TYPE_META, SELF, LITERAL, LOCAL_VAR, PARAMETER,
+            case CONSTANT, SINGLETON, GLOBAL_ENUM, TYPE_META, SELF, SUPER, LITERAL, LOCAL_VAR, PARAMETER,
                  CAPTURE, UNKNOWN -> AssignmentTargetResult.failed(
                     targetKind,
                     true,

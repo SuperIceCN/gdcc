@@ -2,7 +2,7 @@
 
 ## 0. 文档状态与范围
 
-- 状态：**实施计划（尚未实施）**。本文是设计与验收依据，实施完成后把各 Step 的验收结论回填为"当前最终状态"。
+- 状态：**部分已实施**（Step 1–7 已完成并回填验收结论；Step 8 文档修订与全量回归待做）。
 - 范围（对应需求编号 R1–R5）：
     - R1：子类未覆写某 engine virtual 时，子类的 `get_virtual_with_data` 转发父类 `get_virtual_with_data`。
     - R2：子类覆写了 engine virtual 时，`get_virtual_with_data` / `call_virtual_with_data` 正确分派到最派生覆写。
@@ -10,11 +10,11 @@
     - R4：静态分发（已解析到 GDCC owner 的 `CALL_METHOD`）的调用点检查目标方法是否可能被模块内子类覆写：可能 → 生成经 vtable 的间接调用；确定不会 → 照常直接调用（即使该方法覆写了父类）。
     - R5：实现 `CALL_SUPER_METHOD` 指令的 C 代码生成。
 - 非目标（本计划明确不做）：
-    - 前端 lowering 产生 `CallSuperMethodInsn` 的接线（当前前端不产生该指令，见 §1.2；后端实现的是指令生成能力）。
     - 跨 GDCC module 的父类（MVP 不支持，`superclass_canonical_name_contract.md` §6）。
     - GDScript 脚本子类（运行时 attach 的 script instance）对 GDCC 方法的覆写分派（见 §5 D3）。
     - `final` / 禁止覆写语义（类型系统当前无此概念，`gdcc_type_system.md` 全文未定义）。
     - engine 非 virtual 方法的覆写分派（GDScript 语义下属于脚本遮蔽，本计划不涉及）。
+    - `super(...)` / `super._init(...)` 形式的显式父类构造调用（GDCC 构造器自动链式调用父类 `_init`，`entry.c.ftl` `class_constructor`，显式调用会双跑；前端 fail-closed，见 Step 6）。
 
 ## 1. 现状调研结论（代码事实）
 
@@ -33,7 +33,7 @@
 - `LirFunctionDef` 无任何 override/virtual/final 标记（`LirFunctionDef.java:17-37`）。
 - `CALL_SUPER_METHOD` 已在 `GdInstruction.java:77` 定义（`call_super_method`，可选返回值，操作数 = 方法名 + 对象变量 + VARARGS），语义见 `gdcc_low_ir.md` §Call Instructions 582-589 行（"调用对象的父类方法；父类不存在该方法时产生运行时错误"）。`ParsedLirInstruction.java:194-200` 已能解析为 `CallSuperMethodInsn(resultId, methodName, objectId, args)`。
 - `CCodegen.java:41-74` 的 `INSN_GENS` 注册表中**没有** `CallSuperMethodInsnGen`；缺失 generator 时 `CCodegen.java:584-594` 抛 `UnsupportedOperationException`。`CConstructInsnGenTest.java:723-743` 正是用 `CALL_SUPER_METHOD` 作为"未注册 opcode 必须 fail-fast"的探针——实现后须换用其他未注册 opcode（当前候选 `GET_CLASS_NAME`，已核对未注册，实施时复核）。
-- 前端 lowering 当前不产生 `CallSuperMethodInsn`（`src/main/java/gd/script/gdcc/frontend/` 全仓 grep 无匹配）；指令只可能来自手写/解析的 LIR。
+- 调研时前端 lowering 不产生 `CallSuperMethodInsn`；**Step 6–7（2026-09-10）起前端 super 语法接线落地**，`super.m(...)` / `super(...)` 经 `SUPER_METHOD` 路由降低为该指令（前端合同见 `frontend_super_call_implementation.md`）。
 
 ### 1.3 后端调用链事实
 
@@ -482,7 +482,36 @@ void <C>_class_call_virtual_with_data(GDExtensionClassInstancePtr p_instance, ..
 - 测试回填：`CallSuperMethodInsnGenTest`（16 例：GDCC 父方法直调且断言**无** `class_vtable`/`vt_recv` 形态、祖父 owner 解析、engine exact helper、coroutine start thunk 直调、结果写入、owner default_value_func 缺参补全、vararg 尾部打包、inner class 父类 canonical 命名双层锚定（C 符号保留 `__sub__`、fat helper 用 `cIdentifier` 单层下划线），及词法不变量违反/无父类/父链不可解析（`RECEIVER_METADATA_UNKNOWN`）/已知父类缺方法（`METHOD_MISSING`）/static 父方法（instance-only 守卫）/`super._init`/void 带 resultId/coroutine 缺 result 八条负例）；round-trip 断言按既有 lir 合同测试惯例独立为 `CallSuperMethodInsnContractTest`（11 例，含序列化形态与负例解析）。验收命令加 `CallSuperMethodInsnContractTest` 后全绿；`gd.script.gdcc.backend.c.gen.*` 全包回归全绿。
 - 审阅回填：`review-expert-a` 初审结论**通过**，无高风险；2 条中风险已修复——(1) `gdcc_low_ir.md` 的 `compiler::GdccCoroState` 生产者集合扩为 `call_method`/`call_super_method`/`call_static_method`（call_method 小节与 §Coroutine Instructions 两处同步）；(2) super 解析到 static 方法由静默丢 receiver 改为 `invalidInsn`（super 是实例语义，无 static 形态，比 CALL_METHOD 的 warn 更严）。低风险已处理：§2.5 设计签名补 `receiverVar` 实参并记录 static 守卫；`emitResolvedCall` 注释承认第三调用方并冻结"super 必须 `indirect == null`、禁止在本共享流加 vtable 闸门"；DynamicFallback 诊断消息改带 `DynamicFallbackReason`；测试补强（Ghost 断言精确化 + 三个新锚定用例）。engine virtual（如 `super._ready()`）经 exact helper 的 MethodBind 限制属 CALL_METHOD 既有限制被继承，非本步缺陷，不在此处理。
 
-### Step 6：文档修订与全量回归
+### Step 6：前端 super 语法绑定与语义解析（R5 前端接线 · sema）
+
+- **实施状态：已完成（2026-09-10）**。
+    - 验收：`script/run-gradle-targeted-tests.sh --tests FrontendSuperCallSemanticsTest,FrontendSuperCallSupportTest`（19+11 例）全绿；回归 `gd.script.gdcc.frontend.**` 全包全绿。
+    - 实施要点回填：
+        - **语法形态**（gdparser 0.5.3 实证，无专用 AST 节点）：`super.m(args)` → `AttributeExpression(IdentifierExpression("super"), [AttributeCallStep])`；裸 `super(args)` → `CallExpression(IdentifierExpression("super"), args)`；非调用形态全部 fail-closed——`super.prop`（链式属性步）与 `super.payload[0]`（链式 `AttributeSubscriptStep`）走 step-0 拦截 FAILED，裸 `super` 值 / `super[0]`（`SubscriptExpression` 基位置）走 compile 位置门禁。
+        - **绑定**：`FrontendBindingKind.SUPER` 新枚举（仅关键字位置标记，不携带值负载）；`FrontendBodyOwnerProcedures.bindIdentifier` 对 `super` 标识符短路进 `bindSuper`（否则被误报为不可解析标识符），属性初始化器边界与 static 上下文规则镜像 `bindSelf`。
+        - **链式解析**：`FrontendChainHeadReceiverSupport.resolveSuperReceiver` 把 super 链头解析为**词法当前类**实例 receiver（`GdObjectType(owningClass)`，与 self 同存储）；`FrontendChainReductionHelper.reduceStep` 在 `stepIndex == 0 && isSuperChainHead(request)` 时进入 `reduceSuperCallStep`——**super 检测走 `ReductionRequest.bindingLookup`（pending 感知视图）而非稳定表**，chain binding 阶段 top-binding 事实尚未 flush（此为本步实证修复的关键坑）。新增 `RouteKind.SUPER_METHOD`；`super.prop` 附 FAILED member 事实（精确锚定诊断），subscript 失败经根表达式传播（镜像既有 subscript 失败路径）。
+        - **共享解析**（`FrontendSuperCallSupport.resolveSuperInstanceMethod`，链式与裸调用共用）：从 `GdObjectType(superName)` 起经 **`ScopeMethodResolver.resolveNearestDeclaredInstanceMethod`**（词法 super 专用入口，见下）解析；fail-closed：无父类 / `_init`（构造自动链，禁止显式调用）/ DynamicFallback / static 目标 / GDCC abstract 目标。**engine virtual 的 abstract 标记不适用该拒绝**（engine 侧的 abstract 是 virtual hook，默认空实现仍可经 super 调用——`super._ready()` 是合法锚点）。
+        - **词法 super 查找入口**（`ScopeMethodResolver.resolveNearestDeclaredInstanceMethod`，2026-09-10 经 review-expert-c 复核后新增，前后端共用）：沿父链向上，**遇到第一个声明该方法名的 owner 即停止**，仅在该 owner 候选内做参数匹配；普通链式实例解析是"先按参数适用性过滤、再按 owner 距离取最近"，会把参数不适用的近端同名声明跳过去绑定参数恰好适用的远端声明（示例：祖父 `m(int)`、直接父 `m(String)`、`super.m(1)` 被错误解析到祖父）——违反 Godot `get_function_signature` 的 stop-at-first-declarer 语义。后端 `BackendMethodCallResolver.resolveSuper` 同步切换到该入口，前后端目标零漂移。
+        - **裸 `super(...)`**：`FrontendBodyOwnerProcedures.resolveCallExpressionType` 拦截 SUPER callee（先于普通 bare-call 路径，避免按字面名 "super" 查函数），隐式方法名取 `context.callableOwner()`（`FunctionDeclaration` 名 / `ConstructorDeclaration`→`_init` 被构造规则拒绝 / lambda→FAILED "enclosing named function"）；`FrontendExpressionSemanticSupport.resolveBareSuperCallExpression` 复用 preliminary/finalized 双段参数定稿（含 container-literal 上下文）。
+        - **事实形态**：`FrontendResolvedCall` 允许 `SUPER_METHOD` 携带 `exactCallableBoundary`；链式事实键 = `AttributeCallStep`，裸调用键 = `CallExpression`（与既有键控合同一致）；receiverType = 词法当前类（后端词法 self 不变量的前提）。
+        - **compile 闸口**：`FrontendCompileCheckAnalyzer.scanSuperPositionCompileBlocks`——SUPER binding 只允许出现在裸调用 callee 或链头位置；`var x = super`、`foo(super)` 等值位置形态在 compile 模式报错（否则会被静默降级为 self 别名）。注意该 analyzer 只在 `analyzeForCompile` 运行，测试基建必须用此入口。
+        - **lambda 捕获**：`FrontendVariableAnalyzer` 的捕获扫描器把 `super` 标识符视同显式 `self` 使用（super 调用仍向 self 发收，lambda 必须捕获 enclosing 实例）。
+- 测试：`FrontendSuperCallSemanticsTest`（19 例：链式 RESOLVED + receiverType=当前类 canonical + boundary 发布、裸 `super()` 隐式同名、祖父解析、父链缺失 FAILED+可读消息、参数不匹配携带 resolver 细节、`super.prop` FAILED+member 诊断、`super.payload[0]` 链式下标步精确消息、裸 `super[0]` 值位置闸口、值位置（`var x = super` / `foo(super)`）compile 闸口、static 上下文 binding 错误、static 目标 FAILED、"super 调用结果续链按父类返回类型普通归约"、属性初始化器边界、`super()` in `_init` FAILED 构造链原因、lambda 裸 `super()` FAILED、lambda 内 `super.m()` RESOLVED+捕获 self、engine 父 `super._ready()` RESOLVED/ENGINE owner）；`FrontendSuperCallSupportTest`（11 例单元：无父类/未注册父类/`_init`/static 目标/GDCC abstract 拒绝、engine virtual hook 放行、最近祖先解析、缺方法与参数不匹配的可读消息锚定、**stop-at-first-declarer 两条**——近端参数不适用声明不得被跳过绑定远端适用声明、近端 static 声明不被远端实例方法遮蔽）。
+- 审阅回填：`review-expert-a` 三轮复核——初审 2 中风险（失败诊断压成内部枚举名、合同负例缺锚点）+ 2 低风险（lowering 测试绕过 compile 入口、文首状态行过时）已修复；二轮残留 2 低风险（`super[i]` 锚点形态、文档计数）已修复；三轮**通过**，残留 1 条文档措辞建议已处理。`review-expert-c` 独立终审初审**不通过**：1 条高风险——普通链式实例解析"先按参数适用性过滤、再按 owner 距离取最近"导致 super 跳过近端参数不适用声明绑定远端适用声明（违反 Godot stop-at-first-declarer 语义，且前后端共用同一缺陷）——已修复为新增 `ScopeMethodResolver.resolveNearestDeclaredInstanceMethod` 词法 super 专用入口并同步切换 `FrontendSuperCallSupport` 与 `BackendMethodCallResolver.resolveSuper`（复现测试先行转绿锚定，scope/frontend/backend 全包回归全绿）。
+
+### Step 7：前端 lowering 生成 CALL_SUPER_METHOD（R5 前端接线 · lowering）
+
+- **实施状态：已完成（2026-09-10）**。
+    - 验收：`script/run-gradle-targeted-tests.sh --tests FrontendSuperCallLoweringTest`（3 例）全绿；runtime fixture `runtime/virtual/super_method_dispatch.gd` 经 `GdScriptUnitTestCompileRunnerTest` 实跑通过（非 skip）；回归 `gd.script.gdcc.frontend.**`、`gd.script.gdcc.backend.**`、`gd.script.gdcc.lir.**` 全绿。
+    - 实施要点回填：
+        - `FrontendSequenceItemInsnLoweringProcessors.FrontendCallInsnLoweringProcessor` 新增 `case SUPER_METHOD -> lowerSuperMethodCall`：receiver 经既有 `materializeCallReceiverLeaf`（链式 = super 标识符 opaque 物化 / 裸调用 = 隐式 self 槽），发射 `CallSuperMethodInsn(result, name, receiver, args)`；**不做 receiver 逆提交 writeback**（super receiver 恒为 self 别名，写回恒等；`FrontendCallMutabilitySupport` 对非 INSTANCE_METHOD 天然返回 false），coroutine detach 复用 `emitCoroutineDetachIfNeeded`。
+        - `FrontendOpaqueExprInsnLoweringProcessors` 标识符分支新增 `case SUPER -> AssignInsn(slot, "self")`（super 与 self 同存储，仅调用目标解析不同）。
+        - `FrontendCfgGraphBuilder.buildIdentifierOpaqueRoute`：SUPER 归入 null payload 组（只读别名，永不作可写路由根）。
+        - `FrontendBodyLoweringSession`：`requiresPublishedExactCallableBoundary` 与 `callBoundaryParameterTypes` 覆盖 SUPER_METHOD（后者仅在裸调用无 receiverValueId 的兜底路径触达；engine 目标经 `ClassMethod implements FunctionDef` 兼容）。
+        - 后端词法 self 不变量实证：链式形态 receiver 槽类型 = `SuperLow__sub__Child`（inner class canonical 名），与 `bodyBuilder.clazz()` 一致。
+- 测试：`FrontendSuperCallLoweringTest`（3 例：链式 → 唯一 `CallSuperMethodInsn` + receiver 为 self 别名 temp + 无同名 `CallMethodInsn` + 槽类型 canonical 锚定 + 非 void 结果槽；裸 `super(name)` → objectId 恒为 `self`；engine 父 `super._ready()` 语句位 void 形态）；runtime fixture 覆盖多态层级中 super 绕过 vtable（Leaf 30+Mid 20=50）、跨祖父解析、裸 `super()` 返回值拼接。
+
+### Step 8：文档修订与全量回归
 
 - 修订：
     - `explicit_c_inheritance_layout_contract.md`：把 `_vtable` 字段（位置/条件/accessor/根段链式访问）写入**已锁定结论**（不是附录）；新增条款：vtable trampoline 下行转换是"禁止裸 C cast"的唯一例外（§2.2）；create_instance 序列补 vtable 赋值；
@@ -490,7 +519,7 @@ void <C>_class_call_virtual_with_data(GDExtensionClassInstancePtr p_instance, ..
     - `call_method_implementation.md`：`CALL_SUPER_METHOD` 移出"非目标"，分派模式表补 vtable 间接调用（GDCC 静态分发子形态），示例命令统一为 `script/run-gradle-targeted-tests.sh`；
     - `frontend_engine_virtual_override_implementation.md` §5.1：runtime anchor 名单补继承用例；
     - `test_suite.md`：补 engine-virtual 继承观察用例的夹具写法合同；
-    - `gdcc_backend_todo.md`（路径：`doc/gdcc_backend_todo.md`）：登记遗留项（协变返回放宽、D3 边界、D1 的用户态诊断路径等）；
+    - `gdcc_backend_todo.md`（路径：`doc/gdcc_backend_todo.md`）：登记遗留项（协变返回放宽、D3 边界、D1 的用户态诊断路径、GDScript 式显式 `super(...)` 构造调用的支持评估等）；
     - 本文回填"当前最终状态"。
 - 验收：`./gradlew clean build --no-daemon --info --console=plain` 全绿；既有 golden 变更清单人工核对完毕。
 
@@ -500,8 +529,10 @@ void <C>_class_call_virtual_with_data(GDExtensionClassInstancePtr p_instance, ..
 |---|---|---|
 | 单元 | `CVtablePlannerTest`（新建） | slot 算法、前缀、冲突、coroutine 标记、abstract、排除项、容错 |
 | 单元 | `CallSuperMethodInsnGenTest`（新建）/ `CallMethodInsnGenTest` 新增用例 | 指令级生成形态 |
+| 前端 sema | `FrontendSuperCallSemanticsTest`（Step 6 新建） | super 绑定/链式与裸调用解析、负例诊断、compile 位置闸口、lambda 捕获 |
+| 前端 lowering | `FrontendSuperCallLoweringTest`（Step 7 新建） | `CALL_SUPER_METHOD` 发射形态、self 接收者不变量 |
 | golden | `CCodegenTest` 扩展 / `CVtableCodegenTest`（新建） | entry.h/entry.c 结构、转发段、初始化、inner 链、撞名 fail-fast |
-| runtime | `GdScriptEngineVirtualOverrideRuntimeTest` 扩展 + suite 新夹具；`CallMethodInsnGenEngineInheritanceTest` 扩展 | engine 驱动 virtual 继承分派、多态方法调用 |
+| runtime | `GdScriptEngineVirtualOverrideRuntimeTest` 扩展 + suite 新夹具；`CallMethodInsnGenEngineInheritanceTest` 扩展；`runtime/virtual/super_method_dispatch.gd`（Step 7） | engine 驱动 virtual 继承分派、多态方法调用、super 端到端 |
 | 回归 | `CConstructInsnGenTest` 探针调整；全量 `clean build` | 既有行为不变 |
 
 ## 5. 决策点
@@ -528,11 +559,12 @@ void <C>_class_call_virtual_with_data(GDExtensionClassInstancePtr p_instance, ..
 
 ## 6. 需要同步修订的文档
 
-- `doc/module_impl/backend/explicit_c_inheritance_layout_contract.md`（Step 6，锁定结论 + trampoline 例外条款）
-- `doc/gdcc_c_backend.md`（Step 6，create_instance 序列）
-- `doc/module_impl/backend/call_method_implementation.md`（Step 6）
-- `doc/module_impl/frontend/frontend_engine_virtual_override_implementation.md` §5.1（Step 6，anchor 名单）
-- `doc/test_suite.md`（Step 6，夹具写法合同）
+- `doc/module_impl/frontend/frontend_super_call_implementation.md`（**Step 6–7 新建**，前端 super 合同）
+- `doc/module_impl/backend/explicit_c_inheritance_layout_contract.md`（Step 8，锁定结论 + trampoline 例外条款）
+- `doc/gdcc_c_backend.md`（Step 8，create_instance 序列）
+- `doc/module_impl/backend/call_method_implementation.md`（Step 8）
+- `doc/module_impl/frontend/frontend_engine_virtual_override_implementation.md` §5.1（Step 8，anchor 名单）
+- `doc/test_suite.md`（Step 8，夹具写法合同）
 - `doc/gdcc_low_ir.md`（**Step 5**，call_super_method 措辞）
-- `doc/gdcc_backend_todo.md`（Step 6，遗留项）
-- 本文（Step 6 回填最终状态）
+- `doc/gdcc_backend_todo.md`（Step 8，遗留项）
+- 本文（Step 8 回填最终状态）

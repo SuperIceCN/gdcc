@@ -203,7 +203,7 @@ public final class ScopeMethodResolver {
                 receiverType,
                 methodName,
                 argTypes,
-                (_argumentIndex, sourceType, targetType) ->
+                (_, sourceType, targetType) ->
                         parameterCompatibilityRank.applyAsInt(sourceType, targetType)
         );
     }
@@ -328,7 +328,7 @@ public final class ScopeMethodResolver {
                 receiverTypeMeta,
                 methodName,
                 argTypes,
-                (_argumentIndex, sourceType, targetType) ->
+                (_, sourceType, targetType) ->
                         parameterCompatibilityRank.applyAsInt(sourceType, targetType)
         );
     }
@@ -441,6 +441,86 @@ public final class ScopeMethodResolver {
                     new DynamicFallback(DynamicKind.OBJECT_DYNAMIC, DynamicFallbackReason.AMBIGUOUS_OVERLOAD);
             case CandidateRejected rejected -> new Failed(FailureKind.NO_APPLICABLE_OVERLOAD, rejected.message());
         };
+    }
+
+    /// Lexical-super resolution (Godot `super` semantics): walk from `startType` up the inheritance
+    /// chain and stop at the FIRST class that declares `methodName` at all; argument applicability
+    /// is then evaluated within that declaring owner only.
+    ///
+    /// This intentionally differs from [resolveInstanceMethodWithParameterRank]: the ordinary
+    /// chain-wide lookup filters applicability BEFORE owner distance, which would skip an
+    /// argument-incompatible nearer declaration and silently bind an argument-compatible farther
+    /// one. `super` must instead bind the nearest declaring owner and report the mismatch there.
+    ///
+    /// Result contract mirrors the ordinary object path: an unregistered start class or a chain
+    /// with no declaring owner yields `DynamicFallback`; a declaring owner whose candidates all
+    /// reject the arguments yields `Failed(NO_APPLICABLE_OVERLOAD)` naming that owner.
+    public static @NotNull Result resolveNearestDeclaredInstanceMethod(
+            @NotNull ClassRegistry registry,
+            @NotNull GdObjectType startType,
+            @NotNull String methodName,
+            @NotNull List<GdType> argTypes,
+            @NotNull ParameterCompatibilityRank parameterCompatibilityRank
+    ) {
+        Objects.requireNonNull(registry, "registry");
+        Objects.requireNonNull(startType, "startType");
+        Objects.requireNonNull(methodName, "methodName");
+        Objects.requireNonNull(argTypes, "argTypes");
+        Objects.requireNonNull(parameterCompatibilityRank, "parameterCompatibilityRank");
+
+        try {
+            if (methodName.equals("_init")) {
+                throw new ScopeMethodResolutionException(
+                        FailureKind.CONSTRUCTOR_ROUTE_UNSUPPORTED,
+                        "Constructor member '_init' must not be resolved through ordinary instance method lookup"
+                );
+            }
+            var startClass = registry.getClassDef(startType);
+            if (startClass == null) {
+                return new DynamicFallback(DynamicKind.OBJECT_DYNAMIC, DynamicFallbackReason.RECEIVER_METADATA_UNKNOWN);
+            }
+            ClassDef current = startClass;
+            var visited = new HashSet<String>();
+            while (current != null) {
+                if (!visited.add(current.getName())) {
+                    break;
+                }
+                var ownerKind = resolveOwnerKind(registry, current.getName());
+                var declaredHere = new ArrayList<MethodCandidate>();
+                for (var function : current.getFunctions()) {
+                    if (!function.getName().equals(methodName)) {
+                        continue;
+                    }
+                    declaredHere.add(new MethodCandidate(toResolvedMethod(registry, ownerKind, current, function, 0)));
+                }
+                if (!declaredHere.isEmpty()) {
+                    var selection = chooseBestCandidate(
+                            methodName,
+                            current.getName(),
+                            declaredHere,
+                            argTypes,
+                            true,
+                            parameterCompatibilityRank,
+                            null
+                    );
+                    return switch (selection) {
+                        case CandidateSelected selected -> new Resolved(selected.candidate().resolved());
+                        case CandidateAmbiguous _ ->
+                                new DynamicFallback(DynamicKind.OBJECT_DYNAMIC, DynamicFallbackReason.AMBIGUOUS_OVERLOAD);
+                        case CandidateRejected rejected ->
+                                new Failed(FailureKind.NO_APPLICABLE_OVERLOAD, rejected.message());
+                    };
+                }
+                var superCanonicalName = current.getSuperName();
+                if (superCanonicalName.isBlank()) {
+                    break;
+                }
+                current = registry.getClassDef(new GdObjectType(superCanonicalName));
+            }
+            return new DynamicFallback(DynamicKind.OBJECT_DYNAMIC, DynamicFallbackReason.METHOD_MISSING);
+        } catch (ScopeMethodResolutionException ex) {
+            return new Failed(ex.kind(), ex.getMessage());
+        }
     }
 
     private static @NotNull Result resolveBuiltinInstanceMethod(

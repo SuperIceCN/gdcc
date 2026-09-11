@@ -265,9 +265,10 @@ public record FrontendResolvedCall(
             }
             if (callKind != FrontendCallResolutionKind.INSTANCE_METHOD
                     && callKind != FrontendCallResolutionKind.STATIC_METHOD
+                    && callKind != FrontendCallResolutionKind.SUPER_METHOD
                     && callKind != FrontendCallResolutionKind.CONSTRUCTOR) {
                 throw new IllegalArgumentException(
-                        "exactCallableBoundary is only valid for exact instance/static/constructor routes"
+                        "exactCallableBoundary is only valid for exact instance/static/super/constructor routes"
                 );
             }
         }

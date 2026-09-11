@@ -56,6 +56,7 @@ import gd.script.gdcc.lir.insn.CallGlobalInsn;
 import gd.script.gdcc.lir.insn.CallIntrinsicInsn;
 import gd.script.gdcc.lir.insn.CallMethodInsn;
 import gd.script.gdcc.lir.insn.CallStaticMethodInsn;
+import gd.script.gdcc.lir.insn.CallSuperMethodInsn;
 import gd.script.gdcc.lir.insn.ConstructBuiltinInsn;
 import gd.script.gdcc.lir.insn.ConstructContainerLiteralInsn;
 import gd.script.gdcc.lir.insn.ConstructObjectInsn;
@@ -780,6 +781,7 @@ final class FrontendSequenceItemInsnLoweringProcessors {
             var resolvedCall = session.requireResolvedCall(node.anchor());
             return switch (resolvedCall.callKind()) {
                 case INSTANCE_METHOD -> lowerExactInstanceCall(session, block, node, resolvedCall);
+                case SUPER_METHOD -> lowerSuperMethodCall(session, block, node, resolvedCall);
                 case STATIC_METHOD -> lowerStaticMethodCall(session, block, node, resolvedCall);
                 case CONSTRUCTOR -> lowerConstructorCall(
                         session,
@@ -820,6 +822,29 @@ final class FrontendSequenceItemInsnLoweringProcessors {
             ));
             var continuation = continueAfterReceiverWriteback(session, block, mutatingReceiverRoute, receiverSlotId);
             return emitCoroutineDetachIfNeeded(session, continuation, node);
+        }
+
+        /// `super` calls share the exact-instance receiver/argument materialization, but emit
+        /// `CALL_SUPER_METHOD` so the backend resolves the nearest ancestor implementation from the
+        /// lexical superclass and bypasses vtable dispatch
+        /// (`virtual_override_vtable_implementation.md` §2.5). The receiver is always the
+        /// current-class `self` alias, so no reverse-commit writeback route applies.
+        private @NotNull LirBasicBlock lowerSuperMethodCall(
+                @NotNull FrontendBodyLoweringSession session,
+                @NotNull LirBasicBlock block,
+                @NotNull CallItem node,
+                @NotNull FrontendResolvedCall resolvedCall
+        ) {
+            var receiverSlotId = session.materializeCallReceiverLeaf(block, node);
+            var arguments = session.materializeCallArguments(block, node, resolvedCall);
+            session.emitAssertObjectLiveIfNeeded(block, receiverSlotId);
+            block.appendNonTerminatorInstruction(new CallSuperMethodInsn(
+                    emittedExactResultSlotIdOrNull(session, node, resolvedCall),
+                    resolvedCall.callableName(),
+                    receiverSlotId,
+                    arguments
+            ));
+            return emitCoroutineDetachIfNeeded(session, block, node);
         }
 
         /// Fire-and-forget contract (`frontend_await_implementation.md` §7): a coroutine call whose

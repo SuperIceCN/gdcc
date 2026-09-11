@@ -217,11 +217,18 @@ public final class BackendMethodCallResolver {
                     "' has no super class to resolve from");
         }
         var argTypes = argVars.stream().map(LirVariable::type).toList();
-        var result = ScopeMethodResolver.resolveInstanceMethod(
+        // Lexical-super lookup must stop at the first declaring owner (Godot semantics); the
+        // ordinary chain-wide instance lookup would skip an argument-incompatible nearer
+        // declaration and silently bind a farther one. Frontend super resolution shares this entry
+        // (`FrontendSuperCallSupport`), so the published frontend target cannot drift from the
+        // owner the backend emits here.
+        var result = ScopeMethodResolver.resolveNearestDeclaredInstanceMethod(
                 bodyBuilder.classRegistry(),
                 new GdObjectType(superName),
                 methodName,
-                argTypes
+                argTypes,
+                (_argumentIndex, sourceType, targetType) ->
+                        bodyBuilder.classRegistry().checkAssignable(sourceType, targetType) ? 1 : 0
         );
         return switch (result) {
             case ScopeMethodResolver.Resolved resolved -> {

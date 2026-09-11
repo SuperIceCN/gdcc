@@ -207,6 +207,7 @@ public class GdScriptUnitTestCompileRunnerTest {
             "runtime/virtual/process_called_and_delta_valid.gd",
             "runtime/virtual/ready_called_once.gd",
             "runtime/virtual/ready_parent_chain_dispatch.gd",
+            "runtime/virtual/super_method_dispatch.gd",
             "scene/get_node_control_flow_scene.gd",
             "scene/get_node_lambda_await_scene.gd",
             "scene/get_node_lambda_flow_scene.gd",

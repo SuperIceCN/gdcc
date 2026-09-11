@@ -21,6 +21,11 @@ public enum FrontendBindingKind {
     METHOD,
     /// Bare callee binding that resolved to a static-method overload set.
     STATIC_METHOD,
+    /// The `super` keyword used as a chain head (`super.foo(...)`) or bare callee (`super(...)`).
+    ///
+    /// This is a keyword position marker only: it never carries a resolvable value payload, and
+    /// value-position uses (`var x = super`) are rejected by the compile-check position gate.
+    SUPER,
     CONSTANT,
     SINGLETON,
     GLOBAL_ENUM,

@@ -218,6 +218,7 @@ public final class FrontendChainHeadReceiverSupport {
         return switch (binding.kind()) {
             case TYPE_META -> resolveTypeMetaReceiver(identifier);
             case SELF -> resolveSelfReceiver(identifier);
+            case SUPER -> resolveSuperReceiver(identifier);
             case PARAMETER, LOCAL_VAR, CAPTURE, PROPERTY, SIGNAL, CONSTANT, SINGLETON, GLOBAL_ENUM ->
                     resolveValueReceiver(identifier, binding);
             case METHOD, STATIC_METHOD, UTILITY_FUNCTION -> resolveCallableReceiver(identifier);
@@ -410,6 +411,39 @@ public final class FrontendChainHeadReceiverSupport {
             );
         }
         return resolvedSelf;
+    }
+
+    /// Resolves the `super` keyword for the current AST location.
+    ///
+    /// The receiver value stays the ordinary current-class instance (`super` shares the `self`
+    /// object; only method resolution starts at the superclass). The chain-reduction step-0
+    /// interception reads the SUPER binding to switch onto the super route, so this receiver only
+    /// needs the same availability rules as `self` (property-initializer boundary + static context).
+    public @NotNull FrontendChainReductionHelper.ReceiverState resolveSuperReceiver(@NotNull Node superNode) {
+        if (propertyInitializerContext != null) {
+            return propertyInitializerBoundaryReceiver(FrontendPropertyInitializerSupport.superBoundaryDetail());
+        }
+        var scope = scopesByAst.get(Objects.requireNonNull(superNode, "superNode must not be null"));
+        var owningClass = scope == null ? null : scope.owningClassOrNull();
+        if (owningClass == null) {
+            return new FrontendChainReductionHelper.ReceiverState(
+                    FrontendChainReductionHelper.Status.UNSUPPORTED,
+                    FrontendReceiverKind.UNKNOWN,
+                    null,
+                    null,
+                    "Keyword 'super' is inside a skipped subtree"
+            );
+        }
+        var resolvedSuper = FrontendChainReductionHelper.ReceiverState.resolvedInstance(
+                new GdObjectType(owningClass.getName())
+        );
+        if (staticContext) {
+            return FrontendChainReductionHelper.ReceiverState.blockedFrom(
+                    resolvedSuper,
+                    "Keyword 'super' is not available in static context"
+            );
+        }
+        return resolvedSuper;
     }
 
     private @NotNull FrontendChainReductionHelper.ReceiverState propertyInitializerBoundaryReceiver(
