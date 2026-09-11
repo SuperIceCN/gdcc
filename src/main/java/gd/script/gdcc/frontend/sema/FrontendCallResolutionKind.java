@@ -27,5 +27,11 @@ public enum FrontendCallResolutionKind {
     /// The published route is a runtime-dynamic fallback rather than an exact callable.
     ///
     /// This kind is only valid together with `FrontendCallResolutionStatus.DYNAMIC`.
-    DYNAMIC_FALLBACK
+    DYNAMIC_FALLBACK,
+    /// The call is a `super` route resolved from the lexical superclass chain of the enclosing class.
+    ///
+    /// Super semantics fix the target to the nearest ancestor implementation and bypass virtual
+    /// dispatch, so this kind is never merged into `INSTANCE_METHOD` even though the receiver value
+    /// is the ordinary `self` instance.
+    SUPER_METHOD
 }

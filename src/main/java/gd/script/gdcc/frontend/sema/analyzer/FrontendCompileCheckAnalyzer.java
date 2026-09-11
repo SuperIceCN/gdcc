@@ -294,6 +294,9 @@ public class FrontendCompileCheckAnalyzer {
         private final @NotNull Set<Node> compileSurfaceNodes = Collections.newSetFromMap(new IdentityHashMap<>());
         private final @NotNull Set<Node> handledAnchors = Collections.newSetFromMap(new IdentityHashMap<>());
         private final @NotNull Set<Node> bareCallCallees = Collections.newSetFromMap(new IdentityHashMap<>());
+        /// Chain-head identifiers (`base` of an `AttributeExpression`) tracked so the super position
+        /// gate can tell a legal `super.m(...)` head from a value-position misuse.
+        private final @NotNull Set<Node> chainHeadIdentifiers = Collections.newSetFromMap(new IdentityHashMap<>());
         /// Coroutine-call position checks dedupe by call anchor: a chain root checks its trailing
         /// call step with statement-root privilege, and the later nested walk must not re-report it.
         private final @NotNull Set<Node> checkedCoroutineCallAnchors =
@@ -721,6 +724,7 @@ public class FrontendCompileCheckAnalyzer {
                 default -> {
                     markCompileSurfaceNode(expression);
                     rememberBareCallCallee(expression);
+                    rememberChainHeadIdentifier(expression);
                     checkCoroutineCallPosition(coroutineCallAnchorFor(expression), statementRoot);
                     walkNestedExpressionChildren(expression);
                 }
@@ -738,6 +742,7 @@ public class FrontendCompileCheckAnalyzer {
             var operand = awaitExpression.value();
             markCompileSurfaceNode(operand);
             rememberBareCallCallee(operand);
+            rememberChainHeadIdentifier(operand);
             checkCoroutineCallPosition(coroutineCallAnchorFor(operand), true);
             walkNestedExpressionChildren(operand);
         }
@@ -777,12 +782,35 @@ public class FrontendCompileCheckAnalyzer {
             }
         }
 
+        /// `super` is a call-only keyword: every published SUPER binding must sit in a call
+        /// position (bare-call callee or chain head). Value-position uses such as `var x = super`
+        /// or `foo(super)` type-check as the current-class instance upstream, so without this gate
+        /// they would silently lower as `self` aliases.
+        private void scanSuperPositionCompileBlocks() {
+            for (var entry : symbolBindings.entrySet()) {
+                if (!(entry.getKey() instanceof IdentifierExpression identifierExpression)) {
+                    continue;
+                }
+                var binding = Objects.requireNonNull(entry.getValue(), "binding must not be null");
+                if (binding.kind() != FrontendBindingKind.SUPER
+                        || !compileSurfaceNodes.contains(identifierExpression)
+                        || bareCallCallees.contains(identifierExpression)
+                        || chainHeadIdentifiers.contains(identifierExpression)) {
+                    continue;
+                }
+                reportCompileBlock(
+                        identifierExpression,
+                        "'super' must be followed by a method call: use 'super(...)' or 'super.<method>(...)'"
+                );
+            }
+        }
         /// Re-check all published fact tables once compile surface marking is complete.
         private void scanPublishedCompileBlocks() {
             scanExpressionTypeCompileBlocks();
             scanResolvedMemberCompileBlocks();
             scanResolvedCallCompileBlocks();
             scanBareValueReferenceCompileBlocks();
+            scanSuperPositionCompileBlocks();
             scanSlotTypeCompileBlocks();
         }
 
@@ -943,6 +971,15 @@ public class FrontendCompileCheckAnalyzer {
             if (expression instanceof CallExpression callExpression
                     && callExpression.callee() instanceof IdentifierExpression callee) {
                 bareCallCallees.add(callee);
+            }
+        }
+
+        /// Record the head identifier of a surface `AttributeExpression` chain; `super.m(...)`
+        /// heads are legal super positions even though the identifier itself is not a call callee.
+        private void rememberChainHeadIdentifier(@NotNull Expression expression) {
+            if (expression instanceof AttributeExpression attributeExpression
+                    && attributeExpression.base() instanceof IdentifierExpression head) {
+                chainHeadIdentifiers.add(head);
             }
         }
 

@@ -3702,7 +3702,9 @@ public final class FrontendCfgGraphBuilder {
                     ),
                     List.of()
             );
-            case CONSTANT, SINGLETON, SIGNAL, METHOD, STATIC_METHOD, UTILITY_FUNCTION -> null;
+            // SUPER is a read-only `self` alias restricted to call receiver position; it never
+            // becomes a writable route root (super calls skip reverse-commit writeback).
+            case CONSTANT, SINGLETON, SIGNAL, METHOD, STATIC_METHOD, UTILITY_FUNCTION, SUPER -> null;
             default -> throw new IllegalStateException(
                     "Identifier writable-route publication is not supported for binding kind " + binding.kind()
             );

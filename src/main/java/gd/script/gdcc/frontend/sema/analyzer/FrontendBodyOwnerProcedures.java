@@ -857,6 +857,12 @@ public final class FrontendBodyOwnerProcedures implements FrontendStatementResol
         if (context.typedEnvironment().symbolBinding(identifierExpression) != null) {
             return;
         }
+        // `super` is a keyword position marker, not a value symbol; without the dedicated binding
+        // the generic path would misreport it as an unresolvable identifier.
+        if ("super".equals(identifierExpression.name())) {
+            bindSuper(context, identifierExpression);
+            return;
+        }
         var valueResolution = resolveVisibleValue(context, identifierExpression);
         if (valueResolution.status() == FrontendVisibleValueStatus.FOUND_ALLOWED
                 || valueResolution.status() == FrontendVisibleValueStatus.FOUND_BLOCKED) {
@@ -910,6 +916,37 @@ public final class FrontendBodyOwnerProcedures implements FrontendStatementResol
                 identifierExpression,
                 "Unable to resolve value binding '" + identifierExpression.name() + "'"
         );
+    }
+
+    /// `super` publishes only the keyword binding; availability rules (property-initializer
+    /// boundary, static context) intentionally mirror `bindSelf`.
+    private void bindSuper(
+            @NotNull FrontendSuiteContext context,
+            @NotNull IdentifierExpression identifierExpression
+    ) {
+        if (context.typedEnvironment().symbolBinding(identifierExpression) == null) {
+            context.typedEnvironment().putSymbolBinding(
+                    FrontendSemanticStage.TOP_BINDING,
+                    identifierExpression,
+                    new FrontendBinding("super", FrontendBindingKind.SUPER, null)
+            );
+        }
+        if (context.propertyInitializerContext() != null) {
+            reportUnsupportedBindingMessage(
+                    context,
+                    identifierExpression,
+                    FrontendPropertyInitializerSupport.superBoundaryDetail()
+            );
+            return;
+        }
+        // Static parameter-default islands reject `super` through the metadata owner's single
+        // anchored diagnostic, mirroring the `self` rule in `bindSelf`.
+        if (context.isParameterDefaultIsland() && context.staticContext()) {
+            return;
+        }
+        if (context.staticContext()) {
+            reportBindingError(context, identifierExpression, "Keyword 'super' is not available in static context");
+        }
     }
 
     private void bindSelf(
@@ -2365,6 +2402,26 @@ public final class FrontendBodyOwnerProcedures implements FrontendStatementResol
                 @NotNull CallExpression callExpression,
                 boolean finalizeWindow
         ) {
+            // Bare `super(...)` borrows the enclosing callable's own method name; it must not flow
+            // into the ordinary bare-call path, which would look up a function literally named
+            // "super" and misreport the failure.
+            if (callExpression.callee() instanceof IdentifierExpression bareCallee) {
+                var bareBinding = context.typedEnvironment().symbolBinding(bareCallee);
+                if (bareBinding != null && bareBinding.kind() == FrontendBindingKind.SUPER) {
+                    var superResult = expressionSemanticSupport.resolveBareSuperCallExpression(
+                            bareCallee,
+                            superImplicitMethodNameOrNull(),
+                            context.staticContext(),
+                            callExpression.arguments(),
+                            this::resolveExpressionTypeExpected,
+                            finalizeWindow
+                    );
+                    if (superResult.publishedCallOrNull() != null) {
+                        resolvedCalls.put(callExpression, superResult.publishedCallOrNull());
+                    }
+                    return superResult.expressionType();
+                }
+            }
             var result = expressionSemanticSupport.resolveCallExpressionType(
                     callExpression,
                     this::resolveExpressionTypeExpected,
@@ -2375,6 +2432,17 @@ public final class FrontendBodyOwnerProcedures implements FrontendStatementResol
                 resolvedCalls.put(callExpression, result.publishedCallOrNull());
             }
             return result.expressionType();
+        }
+
+        /// Bare `super(...)` infers the target name from the enclosing callable owner. Lambda owners
+        /// have no stable method name, so they return null and the super route fails closed with a
+        /// dedicated reason instead of guessing a name.
+        private @Nullable String superImplicitMethodNameOrNull() {
+            return switch (context.callableOwner()) {
+                case FunctionDeclaration functionDeclaration -> functionDeclaration.name().trim();
+                case ConstructorDeclaration _ -> "_init";
+                default -> null;
+            };
         }
 
         private @NotNull FrontendExpressionType resolveAttributeExpressionType(

@@ -24,8 +24,11 @@ class GdScriptEngineVirtualOverrideRuntimeTest {
             "runtime/virtual/physics_process_called_and_delta_valid.gd";
     private static final List<String> SCRIPT_RESOURCE_PATHS = List.of(
             PHYSICS_PROCESS_SCRIPT_RESOURCE_PATH,
+            "runtime/virtual/engine_virtual_three_level_forwarding.gd",
+            "runtime/virtual/mixed_engine_virtual_and_vtable.gd",
             "runtime/virtual/process_called_and_delta_valid.gd",
-            "runtime/virtual/ready_called_once.gd"
+            "runtime/virtual/ready_called_once.gd",
+            "runtime/virtual/ready_parent_chain_dispatch.gd"
     );
     private static final Path SCRIPT_ROOT = Path.of("src", "test", "test_suite", "unit_test", "script");
     private static final Path VALIDATION_ROOT = Path.of("src", "test", "test_suite", "unit_test", "validation");
@@ -62,6 +65,10 @@ class GdScriptEngineVirtualOverrideRuntimeTest {
 
         assertFixtureContains(
                 VALIDATION_ROOT.resolve("runtime/virtual/process_called_and_delta_valid.gd"),
+                "process_frame"
+        );
+        assertFixtureContains(
+                VALIDATION_ROOT.resolve("runtime/virtual/engine_virtual_three_level_forwarding.gd"),
                 "process_frame"
         );
         assertFixtureContains(

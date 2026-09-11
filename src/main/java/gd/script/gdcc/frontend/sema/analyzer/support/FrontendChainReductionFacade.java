@@ -154,7 +154,8 @@ public final class FrontendChainReductionFacade {
                 propertyInitializerContextSupplier.get(),
                 expressionTypeResolver,
                 _ -> {
-                }
+                },
+                bindingLookup
         ));
         reducedChains.put(attribute, Optional.of(result));
         return new CachedReduction(result, true);

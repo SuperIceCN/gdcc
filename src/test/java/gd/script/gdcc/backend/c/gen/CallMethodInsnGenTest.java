@@ -19,6 +19,7 @@ import gd.script.gdcc.lir.LirParameterDef;
 import gd.script.gdcc.lir.insn.CallMethodInsn;
 import gd.script.gdcc.lir.insn.DestructInsn;
 import gd.script.gdcc.lir.insn.LineNumberInsn;
+import gd.script.gdcc.lir.insn.LiteralIntInsn;
 import gd.script.gdcc.lir.insn.LoadStaticInsn;
 import gd.script.gdcc.lir.insn.ReturnInsn;
 import gd.script.gdcc.scope.ClassRegistry;
@@ -355,6 +356,228 @@ class CallMethodInsnGenTest {
         assertFalse(body.contains("&($child->_super)"), body);
         assertFalse(body.contains("BaseWorker_base_ping((BaseWorker*)$child);"), body);
         assertFalse(body.contains("godot_Object_call("), body);
+    }
+
+    // ==== Vtable-indirect dispatch ====
+
+    @Test
+    @DisplayName("CALL_METHOD on a polymorphic GDCC method should dispatch indirectly through the introducer vtable")
+    void callMethodPolymorphicShouldEmitVtableIndirectDispatch() {
+        var parentClass = newClass("VtBase");
+        var parentFoo = newFunction("foo");
+        parentFoo.addParameter(new LirParameterDef("self", new GdObjectType("VtBase"), null, parentFoo));
+        entry(parentFoo).appendInstruction(new ReturnInsn(null));
+        parentClass.addFunction(parentFoo);
+
+        var childClass = newClass("VtDerived", "VtBase");
+        var childFoo = newFunction("foo");
+        childFoo.addParameter(new LirParameterDef("self", new GdObjectType("VtDerived"), null, childFoo));
+        entry(childFoo).appendInstruction(new ReturnInsn(null));
+        childClass.addFunction(childFoo);
+
+        var hostClass = newClass("Host");
+        var caller = newFunction("run");
+        caller.createAndAddVariable("parent", new GdObjectType("VtBase"));
+        entry(caller).appendInstruction(new CallMethodInsn(null, "foo", "parent", List.of()));
+        hostClass.addFunction(caller);
+
+        var body = generateBody(hostClass, caller, newApi(List.of(), List.of()), List.of(hostClass, childClass, parentClass));
+        // Receiver materialized once as the introducer fat self; callee and first arg both use the temp.
+        assertTrue(body.contains("gdcc_VtBase_fat_ptr __gdcc_tmp_vt_recv_0 = $parent;"), body);
+        assertTrue(body.contains("VtBase_class_vtable(__gdcc_tmp_vt_recv_0.ptr)->m_foo(__gdcc_tmp_vt_recv_0);"), body);
+        assertFalse(body.contains("VtBase_foo("), body);
+        assertFalse(body.contains("VtDerived_foo("), body);
+        assertFalse(body.contains("godot_Object_call("), body);
+    }
+
+    @Test
+    @DisplayName("CALL_METHOD three-level chain should materialize a mid-typed receiver as the slot introducer fat self")
+    void callMethodPolymorphicThreeLevelShouldMaterializeReceiverAsIntroducerFatSelf() {
+        // Owner != introducer: receiver static type VtMid (nearest owner), slot introducer VtRoot.
+        var parentClass = newClass("VtRoot");
+        var parentFoo = newFunction("foo");
+        parentFoo.addParameter(new LirParameterDef("self", new GdObjectType("VtRoot"), null, parentFoo));
+        entry(parentFoo).appendInstruction(new ReturnInsn(null));
+        parentClass.addFunction(parentFoo);
+
+        var childClass = newClass("VtMid", "VtRoot");
+        var childFoo = newFunction("foo");
+        childFoo.addParameter(new LirParameterDef("self", new GdObjectType("VtMid"), null, childFoo));
+        entry(childFoo).appendInstruction(new ReturnInsn(null));
+        childClass.addFunction(childFoo);
+
+        var grandchildClass = newClass("VtLeaf", "VtMid");
+        var grandchildFoo = newFunction("foo");
+        grandchildFoo.addParameter(new LirParameterDef("self", new GdObjectType("VtLeaf"), null, grandchildFoo));
+        entry(grandchildFoo).appendInstruction(new ReturnInsn(null));
+        grandchildClass.addFunction(grandchildFoo);
+
+        var hostClass = newClass("Host");
+        var caller = newFunction("run");
+        caller.createAndAddVariable("child", new GdObjectType("VtMid"));
+        entry(caller).appendInstruction(new CallMethodInsn(null, "foo", "child", List.of()));
+        hostClass.addFunction(caller);
+
+        var body = generateBody(hostClass, caller, newApi(List.of(), List.of()), List.of(hostClass, grandchildClass, childClass, parentClass));
+        // The VtMid receiver is upcast to the INTRODUCER (VtRoot) fat type before entering the vtable.
+        assertTrue(body.contains("gdcc_VtRoot_fat_ptr __gdcc_tmp_vt_recv_0 = gdcc_VtMid_fat_ptr_upcast_to_VtRoot($child);"), body);
+        assertTrue(body.contains("VtRoot_class_vtable(__gdcc_tmp_vt_recv_0.ptr)->m_foo(__gdcc_tmp_vt_recv_0);"), body);
+        assertFalse(body.contains("VtMid_foo("), body);
+        assertFalse(body.contains("VtRoot_foo("), body);
+        assertFalse(body.contains("VtLeaf_foo("), body);
+    }
+
+    @Test
+    @DisplayName("CALL_METHOD on a final overrider receiver should stay a direct call (devirtualization)")
+    void callMethodFinalOverriderShouldKeepDirectDispatch() {
+        // Two-level chain with no deeper override: isPolymorphicCall(VtFinal, foo) is false,
+        // so the call site must not touch the vtable even though the slot exists.
+        var parentClass = newClass("VtOrigin");
+        var parentFoo = newFunction("foo");
+        parentFoo.addParameter(new LirParameterDef("self", new GdObjectType("VtOrigin"), null, parentFoo));
+        entry(parentFoo).appendInstruction(new ReturnInsn(null));
+        parentClass.addFunction(parentFoo);
+
+        var childClass = newClass("VtFinal", "VtOrigin");
+        var childFoo = newFunction("foo");
+        childFoo.addParameter(new LirParameterDef("self", new GdObjectType("VtFinal"), null, childFoo));
+        entry(childFoo).appendInstruction(new ReturnInsn(null));
+        childClass.addFunction(childFoo);
+
+        var hostClass = newClass("Host");
+        var caller = newFunction("run");
+        caller.createAndAddVariable("child", new GdObjectType("VtFinal"));
+        entry(caller).appendInstruction(new CallMethodInsn(null, "foo", "child", List.of()));
+        hostClass.addFunction(caller);
+
+        var body = generateBody(hostClass, caller, newApi(List.of(), List.of()), List.of(hostClass, childClass, parentClass));
+        assertTrue(body.contains("VtFinal_foo($child);"), body);
+        assertFalse(body.contains("_class_vtable("), body);
+        assertFalse(body.contains("vt_recv"), body);
+    }
+
+    @Test
+    @DisplayName("CALL_METHOD resolving to a GDCC static method should warn and never query the vtable")
+    void callMethodStaticViaInstanceSyntaxShouldNotQueryVtable() {
+        // Static declarations are excluded from slots and break override chains; the gate
+        // additionally skips static resolutions outright, so a descendant instance same-name
+        // method must not pull this call site into vtable dispatch.
+        var parentClass = newClass("VtStaticBase");
+        var make = newFunction("make");
+        make.setStatic(true);
+        parentClass.addFunction(make);
+
+        var childClass = newClass("VtStaticChild", "VtStaticBase");
+        var childMake = newFunction("make");
+        childMake.addParameter(new LirParameterDef("self", new GdObjectType("VtStaticChild"), null, childMake));
+        entry(childMake).appendInstruction(new ReturnInsn(null));
+        childClass.addFunction(childMake);
+
+        var hostClass = newClass("Host");
+        var caller = newFunction("run");
+        caller.createAndAddVariable("parent", new GdObjectType("VtStaticBase"));
+        entry(caller).appendInstruction(new CallMethodInsn(null, "make", "parent", List.of()));
+        hostClass.addFunction(caller);
+
+        var outputBuffer = new ByteArrayOutputStream();
+        var capture = new PrintStream(outputBuffer, true, StandardCharsets.UTF_8);
+        var originalOut = System.out;
+        String body;
+        try {
+            System.setOut(capture);
+            body = generateBody(hostClass, caller, newApi(List.of(), List.of()), List.of(hostClass, childClass, parentClass));
+        } finally {
+            System.setOut(originalOut);
+            capture.close();
+        }
+
+        var output = outputBuffer.toString(StandardCharsets.UTF_8);
+        assertTrue(output.contains("resolved static method 'VtStaticBase.make'"), output);
+        assertTrue(body.contains("VtStaticBase_make();"), body);
+        assertFalse(body.contains("_class_vtable("), body);
+        assertFalse(body.contains("vt_recv"), body);
+    }
+
+    @Test
+    @DisplayName("CALL_METHOD polymorphic with an object return should keep the internal FAT_PTR result path")
+    void callMethodPolymorphicObjectReturnShouldKeepFatPtrResultPath() {
+        // Vtable slots point at internal GDCC functions, so an object return must be
+        // consumed as an internal fat-pointer product — never via the `godot_*` raw-producer
+        // `_from_raw` capture path.
+        var parentClass = newClass("ObjRoot");
+        var who = newFunction("who");
+        who.setReturnType(new GdObjectType("ObjRoot"));
+        who.addParameter(new LirParameterDef("self", new GdObjectType("ObjRoot"), null, who));
+        entry(who).appendInstruction(new ReturnInsn("self"));
+        parentClass.addFunction(who);
+
+        var childClass = newClass("ObjChild", "ObjRoot");
+        var childWho = newFunction("who");
+        childWho.setReturnType(new GdObjectType("ObjRoot"));
+        childWho.addParameter(new LirParameterDef("self", new GdObjectType("ObjChild"), null, childWho));
+        entry(childWho).appendInstruction(new ReturnInsn("self"));
+        childClass.addFunction(childWho);
+
+        var hostClass = newClass("Host");
+        var caller = newFunction("run");
+        caller.createAndAddVariable("parent", new GdObjectType("ObjRoot"));
+        caller.createAndAddVariable("result", new GdObjectType("ObjRoot"));
+        entry(caller).appendInstruction(new CallMethodInsn("result", "who", "parent", List.of()));
+        hostClass.addFunction(caller);
+
+        var body = generateBody(hostClass, caller, newApi(List.of(), List.of()), List.of(hostClass, childClass, parentClass));
+        assertTrue(body.contains("ObjRoot_class_vtable(__gdcc_tmp_vt_recv_0.ptr)->m_who(__gdcc_tmp_vt_recv_0)"), body);
+        assertFalse(body.contains("_from_raw"), body);
+        assertFalse(body.contains("ObjRoot_who("), body);
+    }
+
+    @Test
+    @DisplayName("CALL_METHOD polymorphic with default_value_func should feed the original receiver to the default and vt_recv to the slot")
+    void callMethodPolymorphicDefaultValueFuncShouldKeepOwnerReceiverForDefault() {
+        // Defaults belong to the statically resolved owner signature — the instance
+        // default_value_func still receives the ORIGINAL receiver rendered to the owner type,
+        // while the vtable call's first argument is the materialized introducer temp.
+        var parentClass = newClass("DefRoot");
+        var foo = newFunction("foo");
+        foo.setReturnType(GdIntType.INT);
+        foo.addParameter(new LirParameterDef("self", new GdObjectType("DefRoot"), null, foo));
+        foo.addParameter(new LirParameterDef("value", GdIntType.INT, "default_value", foo));
+        entry(foo).appendInstruction(new ReturnInsn("value"));
+        parentClass.addFunction(foo);
+        var defaultValue = newFunction("default_value");
+        defaultValue.setReturnType(GdIntType.INT);
+        defaultValue.addParameter(new LirParameterDef("self", new GdObjectType("DefRoot"), null, defaultValue));
+        defaultValue.createAndAddVariable("result", GdIntType.INT);
+        entry(defaultValue).appendInstruction(new LiteralIntInsn("result", 7));
+        entry(defaultValue).appendInstruction(new ReturnInsn("result"));
+        parentClass.addFunction(defaultValue);
+
+        var childClass = newClass("DefChild", "DefRoot");
+        var childFoo = newFunction("foo");
+        childFoo.setReturnType(GdIntType.INT);
+        childFoo.addParameter(new LirParameterDef("self", new GdObjectType("DefChild"), null, childFoo));
+        childFoo.addParameter(new LirParameterDef("value", GdIntType.INT, null, childFoo));
+        entry(childFoo).appendInstruction(new ReturnInsn("value"));
+        childClass.addFunction(childFoo);
+
+        var hostClass = newClass("Host");
+        var caller = newFunction("run");
+        caller.createAndAddVariable("parent", new GdObjectType("DefRoot"));
+        caller.createAndAddVariable("result", GdIntType.INT);
+        entry(caller).appendInstruction(new CallMethodInsn("result", "foo", "parent", List.of()));
+        hostClass.addFunction(caller);
+
+        var body = generateBody(hostClass, caller, newApi(List.of(), List.of()), List.of(hostClass, childClass, parentClass));
+        assertTrue(body.contains("DefRoot_default_value($parent);"), body);
+        assertTrue(body.contains(
+                "DefRoot_class_vtable(__gdcc_tmp_vt_recv_0.ptr)->m_foo(__gdcc_tmp_vt_recv_0, __gdcc_tmp_default_arg_1_"), body);
+        assertFalse(body.contains("DefRoot_default_value(__gdcc_tmp_vt_recv_0"), body);
+        assertFalse(body.contains("DefRoot_foo("), body);
+        // Default materialization precedes the indirect call; the receiver temp is declared first.
+        assertOrdered(body,
+                "gdcc_DefRoot_fat_ptr __gdcc_tmp_vt_recv_0 = $parent;",
+                "DefRoot_default_value($parent);",
+                "DefRoot_class_vtable(__gdcc_tmp_vt_recv_0.ptr)->m_foo(");
     }
 
     @Test
@@ -1342,6 +1565,44 @@ class CallMethodInsnGenTest {
 
         var body = generateBody(hostClass, caller, newApi(List.of(), List.of()), List.of(hostClass, workerClass));
         assertTrue(body.contains("$state = Worker_sum_to__coro_start($worker, $count);"), body);
+    }
+
+    @Test
+    @DisplayName("CALL_METHOD on a polymorphic GDCC coroutine should call the start thunk through the vtable")
+    void callMethodPolymorphicCoroutineShouldCallStartThunkIndirectly() {
+        // Coroutine slots store start thunks; the indirect path replaces only the callee,
+        // so the result keeps the compiler::GdccCoroState slot-write discipline.
+        var parentClass = newClass("CoroRoot");
+        var fire = newFunction("fire");
+        fire.setCoroutine(true);
+        fire.addParameter(new LirParameterDef("self", new GdObjectType("CoroRoot"), null, fire));
+        entry(fire).appendInstruction(new ReturnInsn(null));
+        parentClass.addFunction(fire);
+
+        var childClass = newClass("CoroDerived", "CoroRoot");
+        var childFire = newFunction("fire");
+        childFire.setCoroutine(true);
+        childFire.addParameter(new LirParameterDef("self", new GdObjectType("CoroDerived"), null, childFire));
+        entry(childFire).appendInstruction(new ReturnInsn(null));
+        childClass.addFunction(childFire);
+
+        var hostClass = newClass("Host");
+        var caller = newFunction("run");
+        caller.createAndAddVariable("worker", new GdObjectType("CoroRoot"));
+        caller.createAndAddVariable("state", GdccCoroStateType.CORO_STATE);
+        entry(caller).appendInstruction(new CallMethodInsn("state", "fire", "worker", List.of()));
+        hostClass.addFunction(caller);
+
+        var body = generateBody(hostClass, caller, newApi(List.of(), List.of()), List.of(hostClass, childClass, parentClass));
+        assertTrue(body.contains("$state = CoroRoot_class_vtable(__gdcc_tmp_vt_recv_0.ptr)->m_fire(__gdcc_tmp_vt_recv_0);"), body);
+        assertFalse(body.contains("CoroRoot_fire__coro_start("), body);
+        assertFalse(body.contains("CoroRoot_fire("), body);
+        // Slot-write order unchanged: release the old state reference BEFORE the new one lands.
+        assertOrdered(
+                body,
+                "gdcc_coro_state_slot_destroy(&$state);",
+                "$state = CoroRoot_class_vtable(__gdcc_tmp_vt_recv_0.ptr)->m_fire(__gdcc_tmp_vt_recv_0);"
+        );
     }
 
     @Test

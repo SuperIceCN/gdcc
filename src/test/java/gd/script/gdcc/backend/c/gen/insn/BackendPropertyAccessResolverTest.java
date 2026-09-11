@@ -481,23 +481,18 @@ class BackendPropertyAccessResolverTest {
     }
 
     @Test
-    @DisplayName("resolveObjectProperty should fail-fast on inheritance cycle")
-    void resolveObjectPropertyFailsOnInheritanceCycle() {
+    @DisplayName("inheritance cycle should fail fast when the helper chain is constructed")
+    void inheritanceCycleFailsFastAtHelperConstruction() {
         var classA = new LirClassDef("ClassA", "ClassB", false, false, Map.of(), List.of(), List.of(), List.of());
         var classB = new LirClassDef("ClassB", "ClassA", false, false, Map.of(), List.of(), List.of(), List.of());
-        var bodyBuilder = newBodyBuilder(emptyApi(), List.of(classA, classB));
 
+        // The vtable planner mounted on the helper chain detects the GDCC inheritance cycle
+        // while the body builder is constructed, earlier than the resolver's own hierarchy
+        // walk, so the fail-fast now surfaces at fixture construction.
         var ex = assertThrows(
-                InvalidInsnException.class,
-                () -> BackendPropertyAccessResolver.resolveObjectProperty(
-                        bodyBuilder,
-                        new GdObjectType("ClassA"),
-                        "name",
-                        "load_property"
-                )
+                IllegalStateException.class,
+                () -> newBodyBuilder(emptyApi(), List.of(classA, classB))
         );
-
-        assertInstanceOf(InvalidInsnException.class, ex);
         assertTrue(ex.getMessage().contains("inheritance cycle"));
     }
 

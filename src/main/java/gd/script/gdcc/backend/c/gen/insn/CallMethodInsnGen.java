@@ -2,6 +2,7 @@ package gd.script.gdcc.backend.c.gen.insn;
 
 import gd.script.gdcc.backend.c.gen.CBodyBuilder;
 import gd.script.gdcc.backend.c.gen.CInsnGen;
+import gd.script.gdcc.backend.c.gen.CVtablePlanner;
 import gd.script.gdcc.enums.GdInstruction;
 import gd.script.gdcc.lir.LirInstruction;
 import gd.script.gdcc.lir.LirVariable;
@@ -197,6 +198,15 @@ public final class CallMethodInsnGen implements CInsnGen<CallMethodInsn> {
                                         @NotNull LirVariable receiverVar,
                                         @NotNull List<LirVariable> argVars,
                                         @NotNull BackendMethodCallResolver.ResolvedMethodCall resolved) {
+        // Vtable-indirect gate: only GDCC non-static calls may dispatch
+        // polymorphically, and the query must run BEFORE the coroutine split so polymorphic
+        // coroutine slots also route through the vtable.
+        if (resolved.mode() == BackendMethodCallResolver.DispatchMode.GDCC
+                && !resolved.isStatic()
+                && bodyBuilder.helper().isPolymorphicCall(receiverVar.type(), resolved.methodName())) {
+            emitPolymorphicCall(bodyBuilder, instruction.resultId(), receiverVar, argVars, resolved);
+            return;
+        }
         if (resolved.coroutine()) {
             if (resolved.isStatic()) {
                 // Guard rail for anomalous IR: lowering emits `CallStaticMethodInsn` for static
@@ -214,17 +224,79 @@ public final class CallMethodInsnGen implements CInsnGen<CallMethodInsn> {
         emitResolvedCall(bodyBuilder, instruction.resultId(), receiverVar, argVars, resolved, "CALL_METHOD");
     }
 
-    /// Shared exact-signature call flow for `CALL_METHOD`/`CALL_STATIC_METHOD`: default completion,
-    /// vararg collection, void/result handling and engine-usage recording. `receiverVar` is null
-    /// exactly on the static route; `validateFixedArgsAndCompleteDefaults` enforces the receiver
-    /// contract against `resolved.isStatic()`.
+    /// Vtable-indirect dispatch for a polymorphic GDCC call. The receiver is
+    /// materialized ONCE as the slot INTRODUCER's fat self temp: the receiver expression feeds
+    /// both the vtable accessor and the first argument, and the slot function pointer signature
+    /// is introducer-typed, so an owner-typed (or further-descended) fat self would not typecheck.
+    /// `resolved` still drives default completion and the coroutine split — defaults belong to
+    /// the statically resolved owner signature, so `default_value_func` keeps receiving the
+    /// original receiverVar while the call's first argument becomes the materialized temp.
+    private void emitPolymorphicCall(@NotNull CBodyBuilder bodyBuilder,
+                                     @Nullable String resultId,
+                                     @NotNull LirVariable receiverVar,
+                                     @NotNull List<LirVariable> argVars,
+                                     @NotNull BackendMethodCallResolver.ResolvedMethodCall resolved) {
+        var slotEntry = bodyBuilder.helper().findVtableSlot(resolved.ownerClassName(), resolved.methodName())
+                .orElseThrow(() -> bodyBuilder.invalidInsn("Polymorphic call '" + resolved.ownerClassName() + "." +
+                        resolved.methodName() + "' passed isPolymorphicCall but owns no vtable slot" +
+                        " (planner invariant violated)"));
+        var slot = slotEntry.slot();
+        var introducerType = new GdObjectType(slot.introducerClassName());
+        var receiverExpr = BackendPropertyAccessResolver.renderReceiverValue(
+                bodyBuilder,
+                receiverVar,
+                introducerType,
+                "CALL_METHOD",
+                "vtable slot introducer",
+                " for polymorphic call '" + resolved.ownerClassName() + "." + resolved.methodName() + "'"
+        ).generateCode();
+        // Non-owning fat view of the receiver: no retain on copy, hence nothing to release.
+        var vtRecv = bodyBuilder.newTempVariable("vt_recv", introducerType, receiverExpr);
+        bodyBuilder.declareTempVar(vtRecv);
+        var indirect = new IndirectCallShape(slot, vtRecv);
+        if (resolved.coroutine()) {
+            emitCoroutineStartCall(bodyBuilder, resultId, receiverVar, argVars, resolved, "CALL_METHOD", indirect);
+        } else {
+            emitResolvedCall(bodyBuilder, resultId, receiverVar, argVars, resolved, "CALL_METHOD", indirect);
+        }
+    }
+
+    /// Vtable-dispatch call shape, the single source for the indirect emission: the slot
+    /// identity plus the materialized introducer-fat receiver temp. The callee expression
+    /// (constructed inside `CBodyBuilder.call*VtableSlot`) and the call's first argument both
+    /// derive from these two facts. Null on the direct path.
+    private record IndirectCallShape(@NotNull CVtablePlanner.VtableSlot slot,
+                                     @NotNull CBodyBuilder.TempVar vtRecv) {
+    }
+
+    /// Shared exact-signature call flow for `CALL_METHOD`/`CALL_STATIC_METHOD`/`CALL_SUPER_METHOD`:
+    /// default completion, vararg collection, void/result handling and engine-usage recording.
+    /// `receiverVar` is null exactly on the static route; `validateFixedArgsAndCompleteDefaults`
+    /// enforces the receiver contract against `resolved.isStatic()`. `CALL_SUPER_METHOD` always
+    /// takes the direct path (`indirect == null`): super names a fixed ancestor implementation and
+    /// must never dispatch through the vtable, so do NOT add vtable gating to this shared flow.
     static void emitResolvedCall(@NotNull CBodyBuilder bodyBuilder,
                                  @Nullable String resultId,
                                  @Nullable LirVariable receiverVar,
                                  @NotNull List<LirVariable> argVars,
                                  @NotNull BackendMethodCallResolver.ResolvedMethodCall resolved,
                                  @NotNull String insnName) {
-        var callArgs = validateFixedArgsAndCompleteDefaults(bodyBuilder, receiverVar, resolved, argVars, insnName);
+        emitResolvedCall(bodyBuilder, resultId, receiverVar, argVars, resolved, insnName, null);
+    }
+
+    /// `indirect != null` selects the vtable-dispatch variant: the callee is the slot
+    /// member expression (built by `CBodyBuilder.call*VtableSlot` from `indirect`) and the first
+    /// fixed argument the pre-materialized introducer-fat receiver; argument/default/vararg/
+    /// result rules stay identical to the direct path.
+    static void emitResolvedCall(@NotNull CBodyBuilder bodyBuilder,
+                                 @Nullable String resultId,
+                                 @Nullable LirVariable receiverVar,
+                                 @NotNull List<LirVariable> argVars,
+                                 @NotNull BackendMethodCallResolver.ResolvedMethodCall resolved,
+                                 @NotNull String insnName,
+                                 @Nullable IndirectCallShape indirect) {
+        var callArgs = validateFixedArgsAndCompleteDefaults(bodyBuilder, receiverVar, resolved, argVars, insnName,
+                indirect != null ? indirect.vtRecv() : null);
         var fixedCount = resolved.parameters().size();
         var fixedArgs = callArgs.fixedArgs();
 
@@ -243,14 +315,22 @@ public final class CallMethodInsnGen implements CInsnGen<CallMethodInsn> {
                 throw bodyBuilder.invalidInsn("Method '" + resolved.ownerClassName() + "." + resolved.methodName() +
                         "' has no return value but resultId is provided");
             }
-            bodyBuilder.callVoid(resolved.cFunctionName(), fixedArgs, varargs);
+            if (indirect != null) {
+                bodyBuilder.callVoidVtableSlot(indirect.slot(), indirect.vtRecv(), fixedArgs, varargs);
+            } else {
+                bodyBuilder.callVoid(resolved.cFunctionName(), fixedArgs, varargs);
+            }
             destroyTemporaryArgs(bodyBuilder, callArgs.temporaryArgs());
             bodyBuilder.recordUsedEngineMethodCall(resolved);
             return;
         }
 
         var target = resolveResultTarget(bodyBuilder, resultId, resolved);
-        bodyBuilder.callAssign(target, resolved.cFunctionName(), returnType, fixedArgs, varargs);
+        if (indirect != null) {
+            bodyBuilder.callAssignVtableSlot(target, indirect.slot(), indirect.vtRecv(), returnType, fixedArgs, varargs);
+        } else {
+            bodyBuilder.callAssign(target, resolved.cFunctionName(), returnType, fixedArgs, varargs);
+        }
         destroyTemporaryArgs(bodyBuilder, callArgs.temporaryArgs());
         bodyBuilder.recordUsedEngineMethodCall(resolved);
     }
@@ -269,15 +349,33 @@ public final class CallMethodInsnGen implements CInsnGen<CallMethodInsn> {
                                        @NotNull List<LirVariable> argVars,
                                        @NotNull BackendMethodCallResolver.ResolvedMethodCall resolved,
                                        @NotNull String insnName) {
+        emitCoroutineStartCall(bodyBuilder, resultId, receiverVar, argVars, resolved, insnName, null);
+    }
+
+    /// `indirect != null` selects the vtable-dispatch variant: the coroutine slot already
+    /// points at the final overrider's start thunk, so only the callee changes — the result
+    /// target stays the `compiler::GdccCoroState` slot.
+    static void emitCoroutineStartCall(@NotNull CBodyBuilder bodyBuilder,
+                                       @Nullable String resultId,
+                                       @Nullable LirVariable receiverVar,
+                                       @NotNull List<LirVariable> argVars,
+                                       @NotNull BackendMethodCallResolver.ResolvedMethodCall resolved,
+                                       @NotNull String insnName,
+                                       @Nullable IndirectCallShape indirect) {
         if (resolved.isVararg()) {
             // The generated start thunk has a fixed-parameter signature; a vararg tail would
             // produce a C call with more arguments than parameters.
             throw bodyBuilder.invalidInsn("Coroutine method '" + resolved.ownerClassName() + "." +
                     resolved.methodName() + "' is vararg: the coroutine start thunk is fixed-parameter only");
         }
-        var callArgs = validateFixedArgsAndCompleteDefaults(bodyBuilder, receiverVar, resolved, argVars, insnName);
+        var callArgs = validateFixedArgsAndCompleteDefaults(bodyBuilder, receiverVar, resolved, argVars, insnName,
+                indirect != null ? indirect.vtRecv() : null);
         var target = resolveCoroutineStateResultTarget(bodyBuilder, resultId, resolved);
-        bodyBuilder.callAssign(target, resolved.cFunctionName(), GdccCoroStateType.CORO_STATE, callArgs.fixedArgs());
+        if (indirect != null) {
+            bodyBuilder.callAssignVtableSlot(target, indirect.slot(), indirect.vtRecv(), GdccCoroStateType.CORO_STATE, callArgs.fixedArgs());
+        } else {
+            bodyBuilder.callAssign(target, resolved.cFunctionName(), GdccCoroStateType.CORO_STATE, callArgs.fixedArgs());
+        }
         destroyTemporaryArgs(bodyBuilder, callArgs.temporaryArgs());
         bodyBuilder.recordUsedEngineMethodCall(resolved);
     }
@@ -333,6 +431,19 @@ public final class CallMethodInsnGen implements CInsnGen<CallMethodInsn> {
                                                                            @NotNull BackendMethodCallResolver.ResolvedMethodCall resolved,
                                                                            @NotNull List<LirVariable> argVars,
                                                                            @NotNull String insnName) {
+        return validateFixedArgsAndCompleteDefaults(bodyBuilder, receiverVar, resolved, argVars, insnName, null);
+    }
+
+    /// `receiverArgOverride != null` replaces the rendered receiver as first fixed argument: the
+    /// vtable-indirect path passes the materialized introducer-fat temp instead. Only the
+    /// call's first argument is affected — instance `default_value_func` materialization still
+    /// consumes the original receiverVar rendered to the owner type.
+    static @NotNull CompletedCallArgs validateFixedArgsAndCompleteDefaults(@NotNull CBodyBuilder bodyBuilder,
+                                                                           @Nullable LirVariable receiverVar,
+                                                                           @NotNull BackendMethodCallResolver.ResolvedMethodCall resolved,
+                                                                           @NotNull List<LirVariable> argVars,
+                                                                           @NotNull String insnName,
+                                                                           @Nullable CBodyBuilder.ValueRef receiverArgOverride) {
         var providedCount = argVars.size();
         var fixedCount = resolved.parameters().size();
         if (!resolved.isVararg() && providedCount > fixedCount) {
@@ -346,14 +457,15 @@ public final class CallMethodInsnGen implements CInsnGen<CallMethodInsn> {
                 throw bodyBuilder.invalidInsn(insnName + " on instance method '" + resolved.ownerClassName() + "." +
                         resolved.methodName() + "' requires a receiver variable");
             }
-            fixedArgs.add(BackendPropertyAccessResolver.renderReceiverValue(
-                    bodyBuilder,
-                    receiverVar,
-                    resolved.ownerType(),
-                    insnName,
-                    "method owner",
-                    ""
-            ));
+            fixedArgs.add(receiverArgOverride != null ? receiverArgOverride
+                    : BackendPropertyAccessResolver.renderReceiverValue(
+                            bodyBuilder,
+                            receiverVar,
+                            resolved.ownerType(),
+                            insnName,
+                            "method owner",
+                            ""
+                    ));
         }
         var temporaryArgs = new ArrayList<CBodyBuilder.TempVar>(Math.max(0, fixedCount - providedCount));
 

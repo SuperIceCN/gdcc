@@ -19,6 +19,7 @@ import gd.script.gdcc.gdextension.ExtensionUtilityFunction;
 import gd.script.gdcc.lir.LirFunctionDef;
 import gd.script.gdcc.scope.*;
 import gd.script.gdcc.scope.ResolveRestriction;
+import gd.script.gdcc.scope.resolver.ScopeMethodParameter;
 import gd.script.gdcc.scope.resolver.ScopeTypeTextSupport;
 import gd.script.gdcc.type.GdArrayType;
 import gd.script.gdcc.type.GdBoolType;
@@ -298,6 +299,9 @@ public final class FrontendExpressionSemanticSupport {
         }
         return propagated(switch (binding.kind()) {
             case SELF -> resolveSelfExpressionType(identifierExpression).expressionType();
+            case SUPER -> FrontendChainStatusBridge.toPublishedExpressionType(
+                    headReceiverSupportSupplier.get().resolveSuperReceiver(identifierExpression)
+            );
             case PARAMETER, LOCAL_VAR, CAPTURE, PROPERTY, SIGNAL, CONSTANT, SINGLETON, GLOBAL_ENUM ->
                     resolveValueIdentifierExpressionType(identifierExpression, binding);
             case TYPE_META -> FrontendExpressionType.failed(
@@ -314,7 +318,146 @@ public final class FrontendExpressionSemanticSupport {
         });
     }
 
-    /// Shared bare-call / direct-callable semantics.
+    /// Bare `super(...)` call: the implicit method name is the enclosing callable's own name
+    /// (supplied by the owner analyzer, which alone knows `context.callableOwner()`).
+    ///
+    /// The route mirrors the chain `super.m(...)` rules through [FrontendSuperCallSupport] and
+    /// publishes a `SUPER_METHOD` fact keyed by the `CallExpression`, so lowering emits
+    /// `CALL_SUPER_METHOD` with the ordinary `self` receiver instead of a normal self call.
+    /// `super()` inside `_init` fails closed: GDCC constructors chain the parent `_init`
+    /// automatically, so an explicit call would double-run it.
+    public @NotNull ExpressionSemanticResult resolveBareSuperCallExpression(
+            @NotNull IdentifierExpression superCallee,
+            @Nullable String methodName,
+            boolean staticContext,
+            @NotNull List<? extends Expression> arguments,
+            @NotNull ContextualNestedExpressionResolver nestedResolver,
+            boolean finalizeWindow
+    ) {
+        // Preliminary generic snapshot for candidate applicability; mirrors the ordinary bare path.
+        var preliminary = resolveCallArgumentTypes(arguments, nestedResolver, false, null);
+        if (preliminary.issue() != null) {
+            if (finalizeWindow) {
+                resolveCallArgumentTypes(arguments, nestedResolver, true, null);
+            }
+            return propagated(preliminary.issue());
+        }
+        var receiverType = currentClassReceiverType(superCallee);
+        if (receiverType == null) {
+            return rootOutcome(FrontendExpressionType.unsupported(
+                    "Bare super call 'super(...)' is inside a skipped subtree"
+            ));
+        }
+        if (methodName == null) {
+            var detailReason = "Bare 'super(...)' requires an enclosing named function or constructor "
+                    + "to infer the method name; use an explicit 'super.<name>(...)' call instead";
+            var finalized = resolveCallArgumentTypes(arguments, nestedResolver, finalizeWindow, null);
+            if (finalized.issue() != null) {
+                return propagated(finalized.issue());
+            }
+            return rootOutcome(
+                    FrontendExpressionType.failed(detailReason),
+                    failedBareSuperCall(superCallee, receiverType, finalized.argumentTypes(), detailReason)
+            );
+        }
+        if (staticContext) {
+            var detailReason = "Keyword 'super' is not available in static context";
+            var finalized = resolveCallArgumentTypes(arguments, nestedResolver, finalizeWindow, null);
+            if (finalized.issue() != null) {
+                return propagated(finalized.issue());
+            }
+            return rootOutcome(
+                    FrontendExpressionType.failed(detailReason),
+                    failedBareSuperCall(
+                            superCallee,
+                            methodName,
+                            receiverType,
+                            finalized.argumentTypes(),
+                            detailReason
+                    )
+            );
+        }
+        var childSourceResolver = FrontendCallableLiteralArgumentSupport.fromContextualResolver(nestedResolver);
+        var resolution = FrontendSuperCallSupport.resolveSuperInstanceMethod(
+                classRegistry,
+                receiverType,
+                methodName,
+                preliminary.argumentTypes(),
+                (argumentIndex, sourceType, targetType) -> FrontendCallableLiteralArgumentSupport
+                        .parameterCompatibilityRank(
+                                classRegistry,
+                                arguments,
+                                childSourceResolver,
+                                argumentIndex,
+                                sourceType,
+                                targetType
+                        )
+        );
+        var resolvedMethod = resolution.method();
+        if (resolvedMethod == null) {
+            var detailReason = Objects.requireNonNull(resolution.detailReason(), "detailReason must not be null");
+            // Finalize with generic expected so argument expression facts still publish.
+            var finalized = resolveCallArgumentTypes(arguments, nestedResolver, finalizeWindow, null);
+            if (finalized.issue() != null) {
+                return propagated(finalized.issue());
+            }
+            return rootOutcome(
+                    FrontendExpressionType.failed(detailReason),
+                    failedBareSuperCall(superCallee, methodName, receiverType, finalized.argumentTypes(), detailReason)
+            );
+        }
+        var selectedParameterTypes = resolvedMethod.parameters().stream()
+                .map(ScopeMethodParameter::type)
+                .toList();
+        var finalized = resolveCallArgumentTypes(arguments, nestedResolver, finalizeWindow, selectedParameterTypes);
+        if (finalized.issue() != null) {
+            return propagated(finalized.issue());
+        }
+        return rootOutcome(
+                FrontendExpressionType.resolved(resolvedMethod.returnType()),
+                FrontendResolvedCall.resolved(
+                        methodName,
+                        FrontendCallResolutionKind.SUPER_METHOD,
+                        FrontendReceiverKind.INSTANCE,
+                        resolvedMethod.ownerKind(),
+                        receiverType,
+                        resolvedMethod.returnType(),
+                        finalized.argumentTypes(),
+                        resolvedMethod.function(),
+                        FrontendResolvedCall.ExactCallableBoundary.fromResolvedMethod(resolvedMethod)
+                )
+        );
+    }
+
+    private @NotNull FrontendResolvedCall failedBareSuperCall(
+            @NotNull IdentifierExpression superCallee,
+            @NotNull String methodName,
+            @NotNull GdType receiverType,
+            @NotNull List<GdType> argumentTypes,
+            @NotNull String detailReason
+    ) {
+        return FrontendResolvedCall.failed(
+                methodName,
+                FrontendCallResolutionKind.SUPER_METHOD,
+                FrontendReceiverKind.INSTANCE,
+                null,
+                receiverType,
+                argumentTypes,
+                null,
+                detailReason
+        );
+    }
+
+    private @NotNull FrontendResolvedCall failedBareSuperCall(
+            @NotNull IdentifierExpression superCallee,
+            @NotNull GdType receiverType,
+            @NotNull List<GdType> argumentTypes,
+            @NotNull String detailReason
+    ) {
+        return failedBareSuperCall(superCallee, superCallee.name(), receiverType, argumentTypes, detailReason);
+    }
+
+
     ///
     /// `resolveArgumentsWhenCalleeUnresolved` preserves the current analyzer-specific traversal
     /// contract:
@@ -542,7 +685,7 @@ public final class FrontendExpressionSemanticSupport {
         }
         return switch (binding.kind()) {
             case METHOD, STATIC_METHOD, UTILITY_FUNCTION -> true;
-            case SELF, LITERAL, LOCAL_VAR, PARAMETER, CAPTURE, PROPERTY, SIGNAL, CONSTANT, SINGLETON,
+            case SELF, SUPER, LITERAL, LOCAL_VAR, PARAMETER, CAPTURE, PROPERTY, SIGNAL, CONSTANT, SINGLETON,
                  GLOBAL_ENUM, TYPE_META, UNKNOWN -> false;
         };
     }

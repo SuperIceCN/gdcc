@@ -1,6 +1,7 @@
 package gd.script.gdcc.frontend.sema.analyzer.support;
 
 import gd.script.gdcc.frontend.sema.FrontendAnalysisData;
+import gd.script.gdcc.frontend.sema.FrontendBinding;
 import gd.script.gdcc.frontend.sema.FrontendBindingKind;
 import gd.script.gdcc.frontend.sema.FrontendCallResolutionKind;
 import gd.script.gdcc.frontend.sema.FrontendExpressionType;
@@ -37,6 +38,7 @@ import dev.superice.gdparser.frontend.ast.AttributePropertyStep;
 import dev.superice.gdparser.frontend.ast.AttributeStep;
 import dev.superice.gdparser.frontend.ast.AttributeSubscriptStep;
 import dev.superice.gdparser.frontend.ast.Expression;
+import dev.superice.gdparser.frontend.ast.IdentifierExpression;
 import dev.superice.gdparser.frontend.ast.Node;
 import dev.superice.gdparser.frontend.ast.UnknownAttributeStep;
 import org.jetbrains.annotations.NotNull;
@@ -48,6 +50,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.OptionalInt;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /// Local left-to-right chain reduction helper used before the published chain analyzer exists.
@@ -83,6 +86,7 @@ public final class FrontendChainReductionHelper {
         INSTANCE_PROPERTY,
         INSTANCE_SIGNAL,
         INSTANCE_METHOD,
+        SUPER_METHOD,
         STATIC_METHOD,
         STATIC_LOAD,
         CONSTRUCTOR,
@@ -323,6 +327,10 @@ public final class FrontendChainReductionHelper {
         }
     }
 
+    /// @param bindingLookup Pending-aware binding view (the same one the facade's head-receiver resolution uses).
+    ///                      Chain binding runs before the top-binding flush, so the stable
+    ///                      `analysisData.symbolBindings()` table may not see the current suite's SUPER binding
+    ///                       yet; the super-head detection must go through this view.
     public record ReductionRequest(
             @NotNull AttributeExpression chainExpression,
             @NotNull ReceiverState headReceiver,
@@ -330,7 +338,8 @@ public final class FrontendChainReductionHelper {
             @NotNull ClassRegistry classRegistry,
             @Nullable FrontendPropertyInitializerSupport.PropertyInitializerContext propertyInitializerContext,
             @NotNull ExpressionTypeResolver expressionTypeResolver,
-            @NotNull NoteSink noteSink
+            @NotNull NoteSink noteSink,
+            @NotNull Function<IdentifierExpression, FrontendBinding> bindingLookup
     ) {
         public ReductionRequest(
                 @NotNull AttributeExpression chainExpression,
@@ -351,6 +360,27 @@ public final class FrontendChainReductionHelper {
             );
         }
 
+        public ReductionRequest(
+                @NotNull AttributeExpression chainExpression,
+                @NotNull ReceiverState headReceiver,
+                @NotNull FrontendAnalysisData analysisData,
+                @NotNull ClassRegistry classRegistry,
+                @Nullable FrontendPropertyInitializerSupport.PropertyInitializerContext propertyInitializerContext,
+                @NotNull ExpressionTypeResolver expressionTypeResolver,
+                @NotNull NoteSink noteSink
+        ) {
+            this(
+                    chainExpression,
+                    headReceiver,
+                    analysisData,
+                    classRegistry,
+                    propertyInitializerContext,
+                    expressionTypeResolver,
+                    noteSink,
+                    analysisData.symbolBindings()::get
+            );
+        }
+
         public ReductionRequest {
             Objects.requireNonNull(chainExpression, "chainExpression must not be null");
             Objects.requireNonNull(headReceiver, "headReceiver must not be null");
@@ -358,6 +388,7 @@ public final class FrontendChainReductionHelper {
             Objects.requireNonNull(classRegistry, "classRegistry must not be null");
             Objects.requireNonNull(expressionTypeResolver, "expressionTypeResolver must not be null");
             Objects.requireNonNull(noteSink, "noteSink must not be null");
+            Objects.requireNonNull(bindingLookup, "bindingLookup must not be null");
         }
     }
 
@@ -488,6 +519,41 @@ public final class FrontendChainReductionHelper {
             @NotNull ReductionRequest request,
             @NotNull List<ReductionNote> notes
     ) {
+        // A `super` chain head only licenses a single leading call step; the super route owns step 0
+        // and any later suffix reduces against the call result like an ordinary chain.
+        if (stepIndex == 0 && isSuperChainHead(request)) {
+            return switch (step) {
+                case AttributeCallStep callStep ->
+                        reduceSuperCallStep(stepIndex, callStep, incomingReceiver, request);
+                case AttributePropertyStep propertyStep -> {
+                    var detailReason = "'super' only supports method calls; property access '"
+                            + propertyStep.name() + "' is not allowed";
+                    yield failedSuperHeadStep(
+                            stepIndex,
+                            propertyStep,
+                            incomingReceiver,
+                            FrontendResolvedMember.failed(
+                                    propertyStep.name(),
+                                    FrontendBindingKind.PROPERTY,
+                                    FrontendReceiverKind.INSTANCE,
+                                    null,
+                                    incomingReceiver.receiverType(),
+                                    null,
+                                    detailReason
+                            ),
+                            detailReason
+                    );
+                }
+                case AttributeSubscriptStep subscriptStep -> failedSuperHeadStep(
+                        stepIndex,
+                        subscriptStep,
+                        incomingReceiver,
+                        null,
+                        "'super' only supports method calls; subscript access is not allowed"
+                );
+                case UnknownAttributeStep unknownStep -> unsupportedUnknownStep(stepIndex, unknownStep, incomingReceiver);
+            };
+        }
         return switch (step) {
             case AttributePropertyStep propertyStep ->
                     reducePropertyStep(stepIndex, propertyStep, incomingReceiver, request, notes);
@@ -496,6 +562,109 @@ public final class FrontendChainReductionHelper {
                     reduceSubscriptStep(stepIndex, subscriptStep, incomingReceiver, request, notes);
             case UnknownAttributeStep unknownStep -> unsupportedUnknownStep(stepIndex, unknownStep, incomingReceiver);
         };
+    }
+
+    /// The chain head is `super` exactly when top binding published the SUPER keyword binding for
+    /// the base identifier; the published fact is the single source of truth, not the spelled name.
+    private static boolean isSuperChainHead(@NotNull ReductionRequest request) {
+        if (!(request.chainExpression().base() instanceof IdentifierExpression baseIdentifier)) {
+            return false;
+        }
+        var binding = request.bindingLookup().apply(baseIdentifier);
+        return binding != null && binding.kind() == FrontendBindingKind.SUPER;
+    }
+
+    /// `super.m(...)` resolves from the lexical superclass of the enclosing class (never the
+    /// receiver's dynamic type) and publishes a `SUPER_METHOD` route so lowering emits
+    /// `CALL_SUPER_METHOD` instead of the vtable-dispatched ordinary call. Unlike the ordinary
+    /// instance route there is no warning-level outcome to record in `notes`: every divergent
+    /// super form (static target, missing parent chain method, subscript/property steps) is a
+    /// fail-closed `FAILED` fact, mirroring the backend's `invalidInsn` strictness.
+    private static @NotNull StepTrace reduceSuperCallStep(
+            int stepIndex,
+            @NotNull AttributeCallStep step,
+            @NotNull ReceiverState incomingReceiver,
+            @NotNull ReductionRequest request
+    ) {
+        var argumentResolution = resolveArgumentTypes(step.arguments(), request);
+        if (argumentResolution.status() != Status.RESOLVED) {
+            return unresolvedCallDependencyTrace(
+                    stepIndex,
+                    step,
+                    incomingReceiver,
+                    argumentResolution,
+                    RouteKind.SUPER_METHOD,
+                    FrontendCallResolutionKind.SUPER_METHOD
+            );
+        }
+        var resolution = FrontendSuperCallSupport.resolveSuperInstanceMethod(
+                request.classRegistry(),
+                Objects.requireNonNull(incomingReceiver.receiverType(), "receiverType must not be null"),
+                step.name(),
+                argumentResolution.argumentTypes(),
+                literalAwareParameterRank(request, step.arguments())
+        );
+        var resolvedMethod = resolution.method();
+        if (resolvedMethod == null) {
+            var detailReason = Objects.requireNonNull(resolution.detailReason(), "detailReason must not be null");
+            return new StepTrace(
+                    stepIndex,
+                    step,
+                    StepKind.CALL,
+                    RouteKind.SUPER_METHOD,
+                    incomingReceiver,
+                    Status.FAILED,
+                    ReceiverState.failedFrom(incomingReceiver, detailReason),
+                    null,
+                    null,
+                    FrontendResolvedCall.failed(
+                            step.name(),
+                            FrontendCallResolutionKind.SUPER_METHOD,
+                            FrontendReceiverKind.INSTANCE,
+                            null,
+                            incomingReceiver.receiverType(),
+                            argumentResolution.argumentTypes(),
+                            null,
+                            detailReason
+                    ),
+                    argumentResolution.retryUsed(),
+                    detailReason
+            );
+        }
+        return resolvedCallTrace(
+                stepIndex,
+                step,
+                incomingReceiver,
+                RouteKind.SUPER_METHOD,
+                FrontendReceiverKind.INSTANCE,
+                FrontendCallResolutionKind.SUPER_METHOD,
+                resolvedMethod,
+                argumentResolution.argumentTypes(),
+                argumentResolution.retryUsed()
+        );
+    }
+
+    private static @NotNull StepTrace failedSuperHeadStep(
+            int stepIndex,
+            @NotNull AttributeStep step,
+            @NotNull ReceiverState incomingReceiver,
+            @Nullable FrontendResolvedMember failedMember,
+            @NotNull String detailReason
+    ) {
+        return new StepTrace(
+                stepIndex,
+                step,
+                failedMember != null ? StepKind.PROPERTY : StepKind.UNKNOWN,
+                RouteKind.SUPER_METHOD,
+                incomingReceiver,
+                Status.FAILED,
+                ReceiverState.failedFrom(incomingReceiver, detailReason),
+                null,
+                failedMember,
+                null,
+                false,
+                detailReason
+        );
     }
 
     private static @NotNull StepTrace reducePropertyStep(

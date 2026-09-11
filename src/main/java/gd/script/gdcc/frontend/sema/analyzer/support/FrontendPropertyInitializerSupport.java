@@ -116,6 +116,7 @@ public final class FrontendPropertyInitializerSupport {
         }
         return switch (bindingKind) {
             case SELF -> selfBoundaryDetail();
+            case SUPER -> superBoundaryDetail();
             case PROPERTY -> currentInstanceHierarchyNonStaticValueKind(context, symbolName) == ScopeValueKind.PROPERTY
                     ? currentInstanceHierarchyNonStaticMemberDetail("property", symbolName)
                     : null;
@@ -208,6 +209,11 @@ public final class FrontendPropertyInitializerSupport {
 
     public static @NotNull String selfBoundaryDetail() {
         return "Property initializer MVP does not support accessing 'self' or other current-instance-hierarchy non-static members";
+    }
+
+    public static @NotNull String superBoundaryDetail() {
+        return "Property initializer MVP does not support 'super' calls "
+                + "(current-instance-hierarchy non-static member access)";
     }
 
     public static @NotNull String unsupportedSelfMessage() {

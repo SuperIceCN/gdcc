@@ -62,6 +62,7 @@ public class CCodegen implements Codegen {
         registerInsnGen(new PackUnpackVariantInsnGen());
         registerInsnGen(new CallGlobalInsnGen());
         registerInsnGen(new CallMethodInsnGen());
+        registerInsnGen(new CallSuperMethodInsnGen());
         registerInsnGen(new CallStaticMethodInsnGen());
         registerInsnGen(new CallIntrinsicInsnGen());
         registerInsnGen(new ConstructInsnGen());
@@ -855,6 +856,13 @@ public class CCodegen implements Codegen {
                     "_class_get_virtual_with_data", "_class_call_virtual_with_data",
                     "_class_binding_callbacks", "_object_ptr", "_set_object_ptr")) {
                 registerFileScopeSymbol(symbolSources, className + suffix, "class machinery of '" + className + "'");
+            }
+            // The vtable accessor exists only for slot-introducing classes, so it is registered
+            // conditionally: a user method named `class_vtable` stays legal on slotless classes
+            // but conflicts here exactly like the machinery suffixes above once emitted.
+            if (helper.vtablePlanner().introducesSlot(className)) {
+                registerFileScopeSymbol(symbolSources, helper.renderVtableAccessorName(className),
+                        "vtable accessor of '" + className + "'");
             }
             for (var function : classDef.getFunctions()) {
                 registerFileScopeSymbol(symbolSources, className + "_" + function.getName(),

@@ -1763,7 +1763,8 @@ public final class FrontendBodyLoweringSession {
             @NotNull FrontendResolvedCall resolvedCall
     ) {
         return resolvedCall.status() == FrontendCallResolutionStatus.RESOLVED
-                && resolvedCall.callKind() == FrontendCallResolutionKind.INSTANCE_METHOD
+                && (resolvedCall.callKind() == FrontendCallResolutionKind.INSTANCE_METHOD
+                || resolvedCall.callKind() == FrontendCallResolutionKind.SUPER_METHOD)
                 && item.receiverValueIdOrNull() != null;
     }
 
@@ -1774,7 +1775,8 @@ public final class FrontendBodyLoweringSession {
             @NotNull FrontendCallResolutionKind callKind
     ) {
         var parameters = List.copyOf(callable.getParameters());
-        if (callKind == FrontendCallResolutionKind.INSTANCE_METHOD
+        if ((callKind == FrontendCallResolutionKind.INSTANCE_METHOD
+                || callKind == FrontendCallResolutionKind.SUPER_METHOD)
                 && !callable.isStatic()
                 && !parameters.isEmpty()
                 && parameters.getFirst().getName().equals("self")) {

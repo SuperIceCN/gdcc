@@ -190,6 +190,67 @@ public final class BackendMethodCallResolver {
         };
     }
 
+    /// Resolve a `super` call. `super` is lexical: the receiver must
+    /// be the containing class's own `self` (static type exactly `bodyBuilder.clazz()`), and
+    /// resolution starts at that class's declared super name — never at the receiver's own type —
+    /// so the emitted call always names the fixed nearest-ancestor implementation. Dynamic
+    /// fallback and unresolvable chains (including a missing super class) are compile-time
+    /// errors; `super._init` is rejected by the shared resolver's constructor-route guard.
+    public static @NotNull ResolvedMethodCall resolveSuper(@NotNull CBodyBuilder bodyBuilder,
+                                                           @NotNull LirVariable receiverVar,
+                                                           @NotNull String methodName,
+                                                           @NotNull List<LirVariable> argVars) {
+        var currentClassName = bodyBuilder.clazz().getName();
+        if (!(receiverVar.type() instanceof GdObjectType)
+                || !receiverVar.type().getTypeName().equals(currentClassName)) {
+            throw bodyBuilder.invalidInsn("call_super_method receiver '" + receiverVar.id() +
+                    "' must be the lexical self of class '" + currentClassName + "', got static type '" +
+                    receiverVar.type().getTypeName() + "'");
+        }
+        for (var i = 0; i < argVars.size(); i++) {
+            InsnGenSupport.rejectCompilerOnlyType(bodyBuilder, argVars.get(i).type(), "call_super_method argument #" + (i + 1));
+        }
+
+        var superName = bodyBuilder.clazz().getSuperName();
+        if (superName.isBlank()) {
+            throw bodyBuilder.invalidInsn("call_super_method '" + methodName + "' on class '" + currentClassName +
+                    "' has no super class to resolve from");
+        }
+        var argTypes = argVars.stream().map(LirVariable::type).toList();
+        // Lexical-super lookup must stop at the first declaring owner (Godot semantics); the
+        // ordinary chain-wide instance lookup would skip an argument-incompatible nearer
+        // declaration and silently bind a farther one. Frontend super resolution shares this entry
+        // (`FrontendSuperCallSupport`), so the published frontend target cannot drift from the
+        // owner the backend emits here.
+        var result = ScopeMethodResolver.resolveNearestDeclaredInstanceMethod(
+                bodyBuilder.classRegistry(),
+                new GdObjectType(superName),
+                methodName,
+                argTypes,
+                (_argumentIndex, sourceType, targetType) ->
+                        bodyBuilder.classRegistry().checkAssignable(sourceType, targetType) ? 1 : 0
+        );
+        return switch (result) {
+            case ScopeMethodResolver.Resolved resolved -> {
+                var call = toResolvedMethodCall(bodyBuilder, resolved.method());
+                if (call.isStatic()) {
+                    // `super` is instance semantics; the shared instance resolver can still leave
+                    // a static candidate when no instance overload matches, but such anomalous IR
+                    // must fail fast rather than silently drop the receiver (unlike CALL_METHOD,
+                    // which only warns, super has no valid static form at all).
+                    throw bodyBuilder.invalidInsn("call_super_method '" + currentClassName + "." + methodName +
+                            "' resolved to static method '" + call.ownerClassName() + "." + methodName +
+                            "': super calls are instance-only");
+                }
+                yield call;
+            }
+            case ScopeMethodResolver.DynamicFallback dynamicFallback -> throw bodyBuilder.invalidInsn(
+                    "call_super_method '" + currentClassName + "." + methodName + "' is not statically resolvable (" +
+                            dynamicFallback.reason() + "): super calls never fall back to dynamic dispatch");
+            case ScopeMethodResolver.Failed failed -> throw bodyBuilder.invalidInsn(failed.message());
+        };
+    }
+
     /// Static counterpart of `resolve(...)`.
     ///
     /// `className` is the receiver canonical name published by lowering (GDCC class, inner class

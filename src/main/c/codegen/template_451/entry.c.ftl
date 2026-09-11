@@ -176,6 +176,27 @@ static ${helper.renderDefaultUserdataTypeName(classDef, function)} ${helper.rend
 </#list>
 </#list>
 
+<#-- Vtable trampolines and instances. A trampoline adapts an inherited slot's introducer -->
+<#-- signature to the final overrider's implementation (its downcast is the single sanctioned -->
+<#-- exception to the no-bare-GDCC-cast contract); instances fill each slot with the final -->
+<#-- overrider — direct impl symbol, trampoline, or NULL for an abstract hole. Iteration uses -->
+<#-- the base-before-derived inheritance order (never raw module order): a derived class's -->
+<#-- instance takes the address of an ANCESTOR's trampoline (when the ancestor stays the final -->
+<#-- overrider of an inherited slot), and static trampolines have no header prototype, so every -->
+<#-- trampoline must be defined before any instance that can reference it. -->
+<#list inheritanceOrderedClassDefs as classDef>
+    <#list helper.vtablePlanner().slots(classDef.name) as slotEntry>
+        <#if slotEntry.finalOverriderClassName == classDef.name && slotEntry.slot.introducerClassName != classDef.name>
+static ${helper.renderVtableTrampolineDefinition(classDef.name, slotEntry)}
+
+        </#if>
+    </#list>
+    <#if helper.vtablePlanner().introducesSlot(classDef.name) || helper.vtablePlanner().overridesInheritedSlot(classDef.name)>
+static const ${helper.renderVtableInstanceTypeName(classDef.name)} ${helper.renderVtableInstanceSymbol(classDef.name)} = ${helper.renderVtableInstanceInitializer(classDef.name)};
+
+    </#if>
+</#list>
+
 <#-- Bind Methods for each class.-->
 <#-- The local `class_name` slot remains the canonical owner identity that registration used above.-->
 <#list module.classDefs as classDef>
@@ -260,6 +281,19 @@ static inline void ${classDef.name}_set_object_ptr(${classDef.name}* self, GDExt
 }
 </#list>
 
+<#-- Vtable accessors (introducers only) read the root `_vtable` field straight through the -->
+<#-- WRAPPER `_super` chain — never a parent accessor (a pass-through parent has none) and -->
+<#-- never the vtable `_super` chain (which skips non-introducer classes). -->
+<#list module.classDefs as classDef>
+    <#if helper.vtablePlanner().introducesSlot(classDef.name)>
+        <#assign vtableTypeName = helper.renderVtableInstanceTypeName(classDef.name)>
+static inline const ${vtableTypeName}* ${helper.renderVtableAccessorName(classDef.name)}(${classDef.name}* self) {
+    return (const ${vtableTypeName}*)${helper.renderVtableFieldAccessExpr(classDef.name)};
+}
+
+    </#if>
+</#list>
+
 // GdExtension Methods for each class
 <#list module.classDefs as classDef>
 <#list classDef.properties as property>
@@ -275,6 +309,15 @@ GDExtensionObjectPtr ${classDef.name}_class_create_instance(void* p_class_userda
     GDExtensionObjectPtr obj = godot_classdb_construct_object2(GD_STATIC_SN(u8"${helper.resolveNearestNativeAncestorName(classDef)}"));
     ${classDef.name}* self = godot_mem_alloc(sizeof(${classDef.name}));
     ${classDef.name}_set_object_ptr(self, obj);
+    <#-- Vtable field initialization happens before the POSTINITIALIZE notification (which is -->
+    <#-- what runs user `_init` through the constructor chain), so virtual calls inside `_init` -->
+    <#-- already dispatch through a valid table. Four cases: no field at all / NULL for -->
+    <#-- side branches / this class's own instance / the nearest non-pass-through ancestor's -->
+    <#-- instance value for pass-through classes — driven entirely by the planner. -->
+    <#assign vtableFieldInit = helper.renderVtableFieldInitExpr(classDef.name)>
+    <#if vtableFieldInit?has_content>
+    ${helper.renderVtableFieldAccessExpr(classDef.name)} = ${vtableFieldInit};
+    </#if>
     godot_object_set_instance(obj, GD_STATIC_SN(u8"${classDef.name}"), self);
     godot_object_set_instance_binding(obj, class_library, self, &${classDef.name}_class_binding_callbacks);
     if (p_notify_postinitialize) {
@@ -357,7 +400,14 @@ void* ${classDef.name}_class_get_virtual_with_data(void* p_class_userdata, GDExt
             }
         </#if>
     </#list>
+    <#if helper.checkGdccClassByName(classDef.superName)>
+    <#-- No own override matched: forward along the GDCC extension class chain (godot-cpp
+         class_db.cpp get_virtual_func pattern); native parents are covered by the engine's
+         own fallback, so the chain only hops across GDCC classes. -->
+    return ${classDef.superName}_class_get_virtual_with_data(p_class_userdata, p_name, p_hash);
+    <#else>
     return NULL;
+    </#if>
 }
 
 void ${classDef.name}_class_call_virtual_with_data(GDExtensionClassInstancePtr p_instance,
@@ -385,6 +435,14 @@ void ${classDef.name}_class_call_virtual_with_data(GDExtensionClassInstancePtr p
             }
         </#if>
     </#list>
+    <#if helper.checkGdccClassByName(classDef.superName)>
+    <#-- No own branch matched: the userdata may come from a GDCC parent's get_virtual (parent
+         impl address or parent default userdata instance), so forward to the parent dispatch.
+         The engine always invokes the most-derived instance's callback, hence the chain must
+         fall through level by level; (Parent*)p_instance is layout-legal via offset-0 embedding.
+         Runs after every own branch so the editor gates stay inside their own-hit branches. -->
+    ${classDef.superName}_class_call_virtual_with_data(p_instance, p_name, p_virtual_call_userdata, p_args, r_ret);
+    </#if>
 }
 
 // Methods for ${classDef.name}

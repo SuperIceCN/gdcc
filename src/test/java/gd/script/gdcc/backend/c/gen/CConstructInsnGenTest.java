@@ -20,7 +20,6 @@ import gd.script.gdcc.lir.LirPropertyDef;
 import gd.script.gdcc.backend.c.gen.insn.ConstructInsnGen;
 import gd.script.gdcc.enums.GdInstruction;
 import gd.script.gdcc.lir.insn.AssertObjectLiveInsn;
-import gd.script.gdcc.lir.insn.CallSuperMethodInsn;
 import gd.script.gdcc.lir.insn.ConstructArrayInsn;
 import gd.script.gdcc.lir.insn.ConstructBuiltinInsn;
 import gd.script.gdcc.lir.insn.ConstructDictionaryInsn;
@@ -30,6 +29,7 @@ import gd.script.gdcc.lir.insn.ConstructSignalInsn;
 import gd.script.gdcc.lir.insn.ConstructStandaloneCallableInsn;
 import gd.script.gdcc.lir.insn.StandaloneCallableKind;
 import gd.script.gdcc.lir.insn.DestructInsn;
+import gd.script.gdcc.lir.insn.GetClassNameInsn;
 import gd.script.gdcc.lir.insn.ReturnInsn;
 import gd.script.gdcc.scope.ClassRegistry;
 import gd.script.gdcc.type.GdArrayType;
@@ -717,28 +717,23 @@ class CConstructInsnGenTest {
         assertTrue(new ConstructInsnGen().getInsnOpcodes().contains(GdInstruction.CONSTRUCT_STANDALONE_CALLABLE));
     }
 
-    /// CALL_SUPER_METHOD has no CInsnGen (CALL_STATIC_METHOD already has one, so the
+    /// GET_CLASS_NAME has no CInsnGen (CALL_SUPER_METHOD has a registered generator, so the
     /// unregistered-opcode probe uses the remaining gap). Dispatch must throw, not skip the insn.
     @Test
     @DisplayName("CCodegen must fail-fast when an opcode is not registered on any CInsnGen")
     void unregisteredOpcodeFailsDispatchInsteadOfSkipping() {
         var clazz = newTestClass();
-        var func = newFunction("unregistered_super_call");
+        var func = newFunction("unregistered_get_class_name");
         func.createAndAddVariable("self", new GdObjectType("Node"));
         func.createAndAddVariable("result", GdVariantType.VARIANT);
-        entry(func).appendInstruction(new CallSuperMethodInsn(
-                "result",
-                "queue_free",
-                "self",
-                List.of()
-        ));
+        entry(func).appendInstruction(new GetClassNameInsn("result", "self"));
         clazz.addFunction(func);
 
         var thrown = assertThrows(
                 UnsupportedOperationException.class,
                 () -> generateBody(clazz, func, apiWithConstructibleObjectClasses())
         );
-        assertTrue(thrown.getMessage().contains("call_super_method"), thrown.getMessage());
+        assertTrue(thrown.getMessage().contains("get_class_name"), thrown.getMessage());
     }
 
     @Test

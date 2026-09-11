@@ -121,6 +121,219 @@ class CallMethodInsnGenEngineInheritanceTest {
         return ZigUtil.findZig() != null;
     }
 
+    @Test
+    @DisplayName("CALL_METHOD polymorphic dispatch should route through the vtable and devirtualize correctly in real Godot")
+    void callMethodPolymorphicVtableDispatchShouldWorkInRealGodot() throws IOException, InterruptedException {
+        if (!hasZig()) {
+            Assumptions.abort("Zig not found; skipping integration test");
+            return;
+        }
+
+        var tempDir = Path.of("tmp/test/call_method_vtable_dispatch");
+        Files.createDirectories(tempDir);
+
+        var projectInfo = new CProjectInfo(
+                "call_method_vtable_dispatch",
+                GodotVersion.V451,
+                tempDir,
+                COptimizationLevel.DEBUG,
+                TargetPlatform.getNativePlatform()
+        );
+        var builder = new CProjectBuilder();
+        builder.initProject(projectInfo);
+
+        var hostClass = newVtableDispatchHostClass();
+        var module = new LirModule(
+                "call_method_vtable_dispatch_module",
+                List.of(hostClass,
+                        newConstFooClass("GDVtableRootWorker", "RefCounted", "foo", 1),
+                        newConstFooClass("GDVtableMidWorker", "GDVtableRootWorker", "foo", 2),
+                        newConstFooClass("GDVtableLeafWorker", "GDVtableMidWorker", "foo", 3),
+                        newConstFooClass("GDPassAWorker", "RefCounted", "bar", 10),
+                        newWorkerClass("GDPassBWorker", "GDPassAWorker"),
+                        newConstFooClass("GDPassCWorker", "GDPassBWorker", "bar", 30),
+                        newConstFooClass("GDSibBaseWorker", "RefCounted", "baz", 100),
+                        newConstFooClass("GDSibOverrideWorker", "GDSibBaseWorker", "baz", 101),
+                        newWorkerClass("GDSibPlainWorker", "GDSibBaseWorker"))
+        );
+        var api = ExtensionApiLoader.loadVersion(GodotVersion.V451);
+        var codegen = new CCodegen();
+        codegen.prepare(new CodegenContext(projectInfo, new ClassRegistry(api)), module);
+
+        var buildResult = builder.buildProject(projectInfo, codegen);
+        assertTrue(buildResult.success(), "Compilation should succeed. Build log:\n" + buildResult.buildLog());
+
+        var entrySource = Files.readString(tempDir.resolve("entry.c"));
+
+        // Polymorphic call sites: indirect through the INTRODUCER accessor; the mid-typed
+        // receiver is upcast to the root fat type at materialization (owner != introducer).
+        var midCallBody = resolveFunctionBody(entrySource, "GDVtableCallHostNode_call_foo_as_mid(");
+        assertTrue(midCallBody.contains(
+                        "gdcc_GDVtableRootWorker_fat_ptr __gdcc_tmp_vt_recv_0 = gdcc_GDVtableMidWorker_fat_ptr_upcast_to_GDVtableRootWorker($mid);"),
+                midCallBody);
+        assertTrue(midCallBody.contains(
+                        "GDVtableRootWorker_class_vtable(__gdcc_tmp_vt_recv_0.ptr)->m_foo(__gdcc_tmp_vt_recv_0)"),
+                midCallBody);
+        assertFalse(midCallBody.contains("GDVtableMidWorker_foo("), midCallBody);
+
+        // Devirtualization anchors: final-overrider and sibling call sites stay direct despite
+        // the slot existing (final-overrider / sibling-branch rules).
+        var leafCallBody = resolveFunctionBody(entrySource, "GDVtableCallHostNode_call_foo_as_leaf(");
+        assertTrue(leafCallBody.contains("GDVtableLeafWorker_foo($leaf)"), leafCallBody);
+        assertFalse(leafCallBody.contains("_class_vtable("), leafCallBody);
+        var plainCallBody = resolveFunctionBody(entrySource, "GDVtableCallHostNode_call_baz_as_plain(");
+        assertTrue(plainCallBody.contains(
+                        "GDSibBaseWorker_baz(gdcc_GDSibPlainWorker_fat_ptr_upcast_to_GDSibBaseWorker($plain))"),
+                plainCallBody);
+        assertFalse(plainCallBody.contains("_class_vtable("), plainCallBody);
+
+        // Pass-through chain: the A-typed call site reads A's accessor; pass-through B owns no
+        // vtable symbol of any kind (its instances share the ancestor table at runtime).
+        var barCallBody = resolveFunctionBody(entrySource, "GDVtableCallHostNode_call_bar_as_a(");
+        assertTrue(barCallBody.contains(
+                        "GDPassAWorker_class_vtable(__gdcc_tmp_vt_recv_0.ptr)->m_bar(__gdcc_tmp_vt_recv_0)"),
+                barCallBody);
+        assertFalse(entrySource.contains("GDPassBWorker_class_vtable"), entrySource);
+
+        var runner = new GodotGdextensionTestRunner(Path.of("test_project"));
+        runner.prepareProject(new GodotGdextensionTestRunner.ProjectSetup(
+                buildResult.artifacts(),
+                List.of(new GodotGdextensionTestRunner.SceneNodeSpec(
+                        "VtableDispatchNode",
+                        hostClass.getName(),
+                        ".",
+                        Map.of()
+                )),
+                new GodotGdextensionTestRunner.TestScriptSpec(vtableDispatchEngineTestScript())
+        ));
+
+        var runResult = runner.run(true);
+        var combinedOutput = runResult.combinedOutput();
+
+        assertTrue(runResult.stopSignalSeen(), "Godot run should emit stop signal.\nOutput:\n" + combinedOutput);
+        assertTrue(combinedOutput.contains("gdcc vtable dispatch check passed."),
+                "All vtable dispatch checks should pass.\nOutput:\n" + combinedOutput);
+        assertFalse(combinedOutput.contains("dispatch check failed"), "No check should fail.\nOutput:\n" + combinedOutput);
+    }
+
+    /// Extracts the body between the braces following a function-definition prefix.
+    /// Relies on the entry.c emission contract that user method functions are DEFINED without
+    /// preceding in-file prototypes (prototypes live in entry.h), so the first prefix match is
+    /// always the definition.
+    private static String resolveFunctionBody(String code, String signaturePrefix) {
+        var signatureIndex = code.indexOf(signaturePrefix);
+        assertTrue(signatureIndex >= 0, () -> "Missing prefix: " + signaturePrefix + "\n" + code);
+        var openBraceIndex = code.indexOf('{', signatureIndex);
+        assertTrue(openBraceIndex >= 0, () -> "Missing opening brace for " + signaturePrefix);
+        var depth = 0;
+        for (var index = openBraceIndex; index < code.length(); index++) {
+            var ch = code.charAt(index);
+            if (ch == '{') {
+                depth++;
+            } else if (ch == '}') {
+                depth--;
+                if (depth == 0) {
+                    return code.substring(openBraceIndex + 1, index);
+                }
+            }
+        }
+        throw new AssertionError("Missing closing brace for " + signaturePrefix);
+    }
+
+    private static LirClassDef newVtableDispatchHostClass() {
+        var clazz = new LirClassDef("GDVtableCallHostNode", "Node");
+        clazz.setSourceFile("call_method_vtable_dispatch_host.gd");
+        var selfType = new GdObjectType(clazz.getName());
+        clazz.addFunction(newCallTargetMethod(selfType, "call_foo_as_root", "root", "GDVtableRootWorker", "foo"));
+        clazz.addFunction(newCallTargetMethod(selfType, "call_foo_as_mid", "mid", "GDVtableMidWorker", "foo"));
+        clazz.addFunction(newCallTargetMethod(selfType, "call_foo_as_leaf", "leaf", "GDVtableLeafWorker", "foo"));
+        clazz.addFunction(newCallTargetMethod(selfType, "call_bar_as_a", "a", "GDPassAWorker", "bar"));
+        clazz.addFunction(newCallTargetMethod(selfType, "call_baz_as_plain", "plain", "GDSibPlainWorker", "baz"));
+        return clazz;
+    }
+
+    /// `name(param: ParamType) -> int`: `result = param.<targetMethod>()`. The receiver's static
+    /// type decides direct vs vtable-indirect dispatch, which is what each scenario pins.
+    private static LirFunctionDef newCallTargetMethod(GdObjectType selfType, String name,
+                                                      String paramName, String paramTypeName, String targetMethod) {
+        var func = newMethod(name, GdIntType.INT, selfType);
+        func.addParameter(new LirParameterDef(paramName, new GdObjectType(paramTypeName), null, func));
+        func.createAndAddVariable("result", GdIntType.INT);
+        entry(func).appendInstruction(new CallMethodInsn("result", targetMethod, paramName, List.of()));
+        entry(func).appendInstruction(new ReturnInsn("result"));
+        return func;
+    }
+
+    /// Worker class declaring one constant-returning int method (the override chain signature
+    /// must match exactly, so every link uses the same shape).
+    private static LirClassDef newConstFooClass(String name, String superName, String methodName, int value) {
+        var clazz = newWorkerClass(name, superName);
+        var selfType = new GdObjectType(name);
+        var func = newMethod(methodName, GdIntType.INT, selfType);
+        func.createAndAddVariable("result", GdIntType.INT);
+        entry(func).appendInstruction(new LiteralIntInsn("result", value));
+        entry(func).appendInstruction(new ReturnInsn("result"));
+        clazz.addFunction(func);
+        return clazz;
+    }
+
+    /// Worker class with no methods (pass-through / plain-sibling links).
+    private static LirClassDef newWorkerClass(String name, String superName) {
+        var clazz = new LirClassDef(name, superName);
+        clazz.setSourceFile("call_method_vtable_dispatch_" + name + ".gd");
+        return clazz;
+    }
+
+    private static String vtableDispatchEngineTestScript() {
+        return """
+                extends Node
+                
+                const TARGET_NODE_NAME = "VtableDispatchNode"
+                
+                func _ready() -> void:
+                    var target = get_parent().get_node_or_null(TARGET_NODE_NAME)
+                    if target == null:
+                        push_error("Target node missing.")
+                        return
+                
+                    var root = GDVtableRootWorker.new()
+                    var mid = GDVtableMidWorker.new()
+                    var leaf = GDVtableLeafWorker.new()
+                
+                    if int(target.call("call_foo_as_root", leaf)) != 3:
+                        push_error("vtable dispatch check failed: root-typed ref to leaf should reach leaf impl (3).")
+                        return
+                    if int(target.call("call_foo_as_root", mid)) != 2:
+                        push_error("vtable dispatch check failed: root-typed ref to mid should reach mid impl (2).")
+                        return
+                    if int(target.call("call_foo_as_root", root)) != 1:
+                        push_error("vtable dispatch check failed: root-typed ref to root should reach root impl (1).")
+                        return
+                    if int(target.call("call_foo_as_mid", leaf)) != 3:
+                        push_error("vtable dispatch check failed: mid-typed ref to leaf should reach leaf impl (3).")
+                        return
+                    if int(target.call("call_foo_as_leaf", leaf)) != 3:
+                        push_error("direct dispatch check failed: leaf-typed ref should stay direct and return 3.")
+                        return
+                
+                    var pass_b = GDPassBWorker.new()
+                    var pass_c = GDPassCWorker.new()
+                    if int(target.call("call_bar_as_a", pass_c)) != 30:
+                        push_error("vtable dispatch check failed: a-typed ref to C should reach C impl (30).")
+                        return
+                    if int(target.call("call_bar_as_a", pass_b)) != 10:
+                        push_error("vtable dispatch check failed: a-typed ref to pass-through B should share A's table and reach A impl (10).")
+                        return
+                
+                    var plain = GDSibPlainWorker.new()
+                    if int(target.call("call_baz_as_plain", plain)) != 100:
+                        push_error("sibling dispatch check failed: plain sibling should reach base impl (100).")
+                        return
+                
+                    print("gdcc vtable dispatch check passed.")
+                """;
+    }
+
     private static LirClassDef newInheritanceHostClass() {
         var clazz = new LirClassDef("GDCallMethodInheritanceNode", "Node");
         clazz.setSourceFile("call_method_engine_inheritance_host.gd");
