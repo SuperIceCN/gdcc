@@ -358,7 +358,7 @@ class CallMethodInsnGenTest {
         assertFalse(body.contains("godot_Object_call("), body);
     }
 
-    // ==== Vtable-indirect dispatch (virtual_override_vtable_implementation.md §2.6, R4) ====
+    // ==== Vtable-indirect dispatch ====
 
     @Test
     @DisplayName("CALL_METHOD on a polymorphic GDCC method should dispatch indirectly through the introducer vtable")
@@ -393,7 +393,7 @@ class CallMethodInsnGenTest {
     @Test
     @DisplayName("CALL_METHOD three-level chain should materialize a mid-typed receiver as the slot introducer fat self")
     void callMethodPolymorphicThreeLevelShouldMaterializeReceiverAsIntroducerFatSelf() {
-        // Owner != introducer (§2.6): receiver static type VtMid (nearest owner), slot introducer VtRoot.
+        // Owner != introducer: receiver static type VtMid (nearest owner), slot introducer VtRoot.
         var parentClass = newClass("VtRoot");
         var parentFoo = newFunction("foo");
         parentFoo.addParameter(new LirParameterDef("self", new GdObjectType("VtRoot"), null, parentFoo));
@@ -430,7 +430,7 @@ class CallMethodInsnGenTest {
     @Test
     @DisplayName("CALL_METHOD on a final overrider receiver should stay a direct call (devirtualization)")
     void callMethodFinalOverriderShouldKeepDirectDispatch() {
-        // Two-level chain with no deeper override: isPolymorphicCall(VtFinal, foo) is false (§2.1),
+        // Two-level chain with no deeper override: isPolymorphicCall(VtFinal, foo) is false,
         // so the call site must not touch the vtable even though the slot exists.
         var parentClass = newClass("VtOrigin");
         var parentFoo = newFunction("foo");
@@ -459,7 +459,7 @@ class CallMethodInsnGenTest {
     @Test
     @DisplayName("CALL_METHOD resolving to a GDCC static method should warn and never query the vtable")
     void callMethodStaticViaInstanceSyntaxShouldNotQueryVtable() {
-        // Static declarations are excluded from slots and break override chains (§2.1); the gate
+        // Static declarations are excluded from slots and break override chains; the gate
         // additionally skips static resolutions outright, so a descendant instance same-name
         // method must not pull this call site into vtable dispatch.
         var parentClass = newClass("VtStaticBase");
@@ -501,7 +501,7 @@ class CallMethodInsnGenTest {
     @Test
     @DisplayName("CALL_METHOD polymorphic with an object return should keep the internal FAT_PTR result path")
     void callMethodPolymorphicObjectReturnShouldKeepFatPtrResultPath() {
-        // §2.6: vtable slots point at internal GDCC functions, so an object return must be
+        // Vtable slots point at internal GDCC functions, so an object return must be
         // consumed as an internal fat-pointer product — never via the `godot_*` raw-producer
         // `_from_raw` capture path.
         var parentClass = newClass("ObjRoot");
@@ -534,7 +534,7 @@ class CallMethodInsnGenTest {
     @Test
     @DisplayName("CALL_METHOD polymorphic with default_value_func should feed the original receiver to the default and vt_recv to the slot")
     void callMethodPolymorphicDefaultValueFuncShouldKeepOwnerReceiverForDefault() {
-        // §2.6: defaults belong to the statically resolved owner signature — the instance
+        // Defaults belong to the statically resolved owner signature — the instance
         // default_value_func still receives the ORIGINAL receiver rendered to the owner type,
         // while the vtable call's first argument is the materialized introducer temp.
         var parentClass = newClass("DefRoot");
@@ -1570,8 +1570,8 @@ class CallMethodInsnGenTest {
     @Test
     @DisplayName("CALL_METHOD on a polymorphic GDCC coroutine should call the start thunk through the vtable")
     void callMethodPolymorphicCoroutineShouldCallStartThunkIndirectly() {
-        // Coroutine slots store start thunks (§2.2); the indirect path replaces only the callee,
-        // so the result keeps the compiler::GdccCoroState slot-write discipline (§2.6).
+        // Coroutine slots store start thunks; the indirect path replaces only the callee,
+        // so the result keeps the compiler::GdccCoroState slot-write discipline.
         var parentClass = newClass("CoroRoot");
         var fire = newFunction("fire");
         fire.setCoroutine(true);

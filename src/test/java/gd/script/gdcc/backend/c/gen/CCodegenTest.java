@@ -832,7 +832,7 @@ public class CCodegenTest {
         assertFalse(innerDispatchBody.contains("gdcc_is_editor_hint"), innerDispatchBody);
     }
 
-    /// R1/R2 (§2.4): a subclass with a GDCC parent must fall through to the parent callbacks when
+    /// A subclass with a GDCC parent must fall through to the parent callbacks when
     /// no own override matches — the engine only ever invokes the most-derived instance's
     /// registered callbacks and never walks extension parents itself. The parent (engine super)
     /// keeps the plain `return NULL;` tail, and the child forwarding trails every own branch so
@@ -895,7 +895,7 @@ public class CCodegenTest {
         assertFalse(parentDispatchBody.contains("class_call_virtual_with_data("), parentDispatchBody);
     }
 
-    /// §2.4: a subclass without any own virtual override emits empty own-branch sections but
+    /// A subclass without any own virtual override emits empty own-branch sections but
     /// still forwards both callbacks to its GDCC parent — otherwise the engine would silently
     /// drop the parent's virtual implementations for instances of the subclass.
     @Test
@@ -936,7 +936,7 @@ public class CCodegenTest {
         );
     }
 
-    /// §2.4: forwarding composes level by level — a grandchild with no own overrides must hop
+    /// Forwarding composes level by level — a grandchild with no own overrides must hop
     /// through the intermediate GDCC class (not directly to the root), so each level's own
     /// overrides and editor gates keep their chance to match.
     @Test

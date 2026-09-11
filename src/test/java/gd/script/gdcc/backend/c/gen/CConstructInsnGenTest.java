@@ -717,8 +717,8 @@ class CConstructInsnGenTest {
         assertTrue(new ConstructInsnGen().getInsnOpcodes().contains(GdInstruction.CONSTRUCT_STANDALONE_CALLABLE));
     }
 
-    /// GET_CLASS_NAME has no CInsnGen (CALL_SUPER_METHOD gained one in vtable plan Step 5, so the
-    /// unregistered-opcode probe moved to the remaining gap). Dispatch must throw, not skip the insn.
+    /// GET_CLASS_NAME has no CInsnGen (CALL_SUPER_METHOD has a registered generator, so the
+    /// unregistered-opcode probe uses the remaining gap). Dispatch must throw, not skip the insn.
     @Test
     @DisplayName("CCodegen must fail-fast when an opcode is not registered on any CInsnGen")
     void unregisteredOpcodeFailsDispatchInsteadOfSkipping() {

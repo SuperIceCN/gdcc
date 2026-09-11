@@ -190,12 +190,12 @@ public final class BackendMethodCallResolver {
         };
     }
 
-    /// Resolve a `super` call (vtable plan §2.5 / Step 5). `super` is lexical: the receiver must
+    /// Resolve a `super` call. `super` is lexical: the receiver must
     /// be the containing class's own `self` (static type exactly `bodyBuilder.clazz()`), and
     /// resolution starts at that class's declared super name — never at the receiver's own type —
     /// so the emitted call always names the fixed nearest-ancestor implementation. Dynamic
-    /// fallback and unresolvable chains (including a missing super class) are compile-time errors
-    /// per D2; `super._init` is rejected by the shared resolver's constructor-route guard.
+    /// fallback and unresolvable chains (including a missing super class) are compile-time
+    /// errors; `super._init` is rejected by the shared resolver's constructor-route guard.
     public static @NotNull ResolvedMethodCall resolveSuper(@NotNull CBodyBuilder bodyBuilder,
                                                            @NotNull LirVariable receiverVar,
                                                            @NotNull String methodName,

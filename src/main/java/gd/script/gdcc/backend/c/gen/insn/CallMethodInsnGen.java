@@ -198,7 +198,7 @@ public final class CallMethodInsnGen implements CInsnGen<CallMethodInsn> {
                                         @NotNull LirVariable receiverVar,
                                         @NotNull List<LirVariable> argVars,
                                         @NotNull BackendMethodCallResolver.ResolvedMethodCall resolved) {
-        // Vtable-indirect gate (vtable plan §2.6): only GDCC non-static calls may dispatch
+        // Vtable-indirect gate: only GDCC non-static calls may dispatch
         // polymorphically, and the query must run BEFORE the coroutine split so polymorphic
         // coroutine slots also route through the vtable.
         if (resolved.mode() == BackendMethodCallResolver.DispatchMode.GDCC
@@ -224,7 +224,7 @@ public final class CallMethodInsnGen implements CInsnGen<CallMethodInsn> {
         emitResolvedCall(bodyBuilder, instruction.resultId(), receiverVar, argVars, resolved, "CALL_METHOD");
     }
 
-    /// Vtable-indirect dispatch for a polymorphic GDCC call (vtable plan §2.6). The receiver is
+    /// Vtable-indirect dispatch for a polymorphic GDCC call. The receiver is
     /// materialized ONCE as the slot INTRODUCER's fat self temp: the receiver expression feeds
     /// both the vtable accessor and the first argument, and the slot function pointer signature
     /// is introducer-typed, so an owner-typed (or further-descended) fat self would not typecheck.
@@ -261,7 +261,7 @@ public final class CallMethodInsnGen implements CInsnGen<CallMethodInsn> {
         }
     }
 
-    /// Vtable-dispatch call shape (§2.6), the single source for the indirect emission: the slot
+    /// Vtable-dispatch call shape, the single source for the indirect emission: the slot
     /// identity plus the materialized introducer-fat receiver temp. The callee expression
     /// (constructed inside `CBodyBuilder.call*VtableSlot`) and the call's first argument both
     /// derive from these two facts. Null on the direct path.
@@ -284,7 +284,7 @@ public final class CallMethodInsnGen implements CInsnGen<CallMethodInsn> {
         emitResolvedCall(bodyBuilder, resultId, receiverVar, argVars, resolved, insnName, null);
     }
 
-    /// `indirect != null` selects the vtable-dispatch variant (§2.6): the callee is the slot
+    /// `indirect != null` selects the vtable-dispatch variant: the callee is the slot
     /// member expression (built by `CBodyBuilder.call*VtableSlot` from `indirect`) and the first
     /// fixed argument the pre-materialized introducer-fat receiver; argument/default/vararg/
     /// result rules stay identical to the direct path.
@@ -352,7 +352,7 @@ public final class CallMethodInsnGen implements CInsnGen<CallMethodInsn> {
         emitCoroutineStartCall(bodyBuilder, resultId, receiverVar, argVars, resolved, insnName, null);
     }
 
-    /// `indirect != null` selects the vtable-dispatch variant (§2.6): the coroutine slot already
+    /// `indirect != null` selects the vtable-dispatch variant: the coroutine slot already
     /// points at the final overrider's start thunk, so only the callee changes — the result
     /// target stays the `compiler::GdccCoroState` slot.
     static void emitCoroutineStartCall(@NotNull CBodyBuilder bodyBuilder,
@@ -435,7 +435,7 @@ public final class CallMethodInsnGen implements CInsnGen<CallMethodInsn> {
     }
 
     /// `receiverArgOverride != null` replaces the rendered receiver as first fixed argument: the
-    /// vtable-indirect path (§2.6) passes the materialized introducer-fat temp instead. Only the
+    /// vtable-indirect path passes the materialized introducer-fat temp instead. Only the
     /// call's first argument is affected — instance `default_value_func` materialization still
     /// consumes the original receiverVar rendered to the owner type.
     static @NotNull CompletedCallArgs validateFixedArgsAndCompleteDefaults(@NotNull CBodyBuilder bodyBuilder,

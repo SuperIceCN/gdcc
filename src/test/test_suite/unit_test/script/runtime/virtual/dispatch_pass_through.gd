@@ -1,7 +1,7 @@
 class_name VtPassThroughChain
 extends Node
 
-# Pass-through anchor (Step 4 scenario 4): B does not override tag(), so its vtable shares the
+# Pass-through anchor: B does not override tag(), so its vtable shares the
 # slot value of A. Dispatch through an A- or B-typed receiver holding a B or C instance must
 # resolve to the nearest real implementation without dereferencing a missing slot.
 class A extends RefCounted:

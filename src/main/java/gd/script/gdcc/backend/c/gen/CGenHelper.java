@@ -59,8 +59,8 @@ public final class CGenHelper {
     private final boolean hasCoroutineFunctions;
     /// Module-wide GDCC vtable plan, computed eagerly so inheritance/signature conflicts fail
     /// fast at helper construction. Production registers the whole module before this point;
-    /// directly constructed fixtures with incomplete registries fall back to slotless planning
-    /// under the planner's tolerance rule.
+    /// directly constructed fixtures with incomplete registries are planned as hierarchy roots
+    /// with an empty inherited prefix under the planner's tolerance rule.
     private final @NotNull CVtablePlanner vtablePlanner;
 
     public CGenHelper(@NotNull CodegenContext context, @NotNull List<? extends ClassDef> classDefs) {
@@ -1802,7 +1802,7 @@ public final class CGenHelper {
     //
     // Single publication point for every vtable-facing symbol/expression the entry templates
     // emit; templates must never re-spell these locally. Two `_super` chains are involved and
-    // must stay distinct (virtual_override_vtable_implementation.md §2.2): the WRAPPER chain
+    // must stay distinct: the WRAPPER chain
     // (direct parent at every generation, backing the root `_vtable` field access) and the
     // VTABLE chain (nearest slot-introducing ancestor, backing typedef prefix embedding). All
     // name components use the raw canonical class name (same layer as `struct <Class>`), except
@@ -1860,7 +1860,7 @@ public final class CGenHelper {
         return className + "_class_vtable";
     }
 
-    /// Call-site indirect-dispatch gate (vtable plan §2.1/§2.6): true only when a proper
+    /// Call-site indirect-dispatch gate: true only when a proper
     /// in-module descendant of the receiver's STATIC type overrides the method. This is the
     /// only legitimate gate — `findVtableSlot` also hits on sibling branches and final
     /// overriders whose call sites must stay direct, so it must never be used as the gate.
@@ -1876,7 +1876,7 @@ public final class CGenHelper {
         return vtablePlanner.findVtableSlot(ownerClassName, methodName);
     }
 
-    /// Call-site callee expression `<I>_class_vtable(<receiverPtrExpr>)->m_<method>` (§2.6):
+    /// Call-site callee expression `<I>_class_vtable(<receiverPtrExpr>)->m_<method>`:
     /// accessor and slot member both live on the INTRODUCER segment, so the call site performs
     /// no vtable `->_super` navigation.
     public @NotNull String renderVtableSlotCalleeExpr(@NotNull String introducerClassName,
@@ -1916,9 +1916,9 @@ public final class CGenHelper {
     }
 
     /// Right-hand side of the `_vtable` write in `<C>_class_create_instance`: "" when the
-    /// hierarchy has no field at all (branch 1), `NULL` for side branches (branch 2), and
+    /// hierarchy carries no vtable field at all, `NULL` for side branches, and
     /// `&gdcc_<X>_vtable_inst` otherwise — pass-through classes resolve to the nearest
-    /// non-pass-through ancestor's instance, never NULL (branch 3/4, §2.3).
+    /// non-pass-through ancestor's instance, never NULL.
     public @NotNull String renderVtableFieldInitExpr(@NotNull String className) {
         return vtablePlanner.resolvedVtableSymbol(className)
                 .map(symbol -> CVtablePlanner.VTABLE_NULL_SYMBOL.equals(symbol) ? symbol : "&" + symbol)

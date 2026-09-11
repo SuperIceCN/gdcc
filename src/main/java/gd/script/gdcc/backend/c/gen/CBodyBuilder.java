@@ -612,11 +612,12 @@ public final class CBodyBuilder {
         return callVoidVtableSlot(slot, vtRecv, args, null);
     }
 
-    /// Void call through a vtable slot (vtable plan §2.6). The callee expression
+    /// Void call through a vtable slot. The callee expression
     /// (`<I>_class_vtable(<vtRecv>.ptr)->m_<method>`) is constructed HERE from the slot identity
     /// and the materialized introducer-fat receiver temp — callers never assemble callee strings.
     /// Emission is identical to `callVoid` except that no Godot binding usage is recorded: the
-    /// callee is not a fixed `godot_*` binding symbol (godot_binding_implementation.md 使用集收集合同).
+    /// callee is not a fixed `godot_*` binding symbol (see the usage-collection contract in
+    /// `godot_binding_implementation.md`).
     public @NotNull CBodyBuilder callVoidVtableSlot(@NotNull CVtablePlanner.VtableSlot slot,
                                                     @NotNull TempVar vtRecv,
                                                     @NotNull List<ValueRef> args,
@@ -692,7 +693,7 @@ public final class CBodyBuilder {
         return callAssignVtableSlot(target, slot, vtRecv, returnType, args, null);
     }
 
-    /// Assigning call through a vtable slot (vtable plan §2.6); the callee expression is
+    /// Assigning call through a vtable slot; the callee expression is
     /// constructed internally from `slot` + `vtRecv` (see `requireVtableSlotCalleeExpr`). No Godot
     /// binding usage is recorded (callee is not a `godot_*` symbol). Object returns follow the
     /// internal FAT_PTR path — vtable slots point at internal GDCC functions, never the `godot_*`

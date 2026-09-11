@@ -311,7 +311,7 @@ GDExtensionObjectPtr ${classDef.name}_class_create_instance(void* p_class_userda
     ${classDef.name}_set_object_ptr(self, obj);
     <#-- Vtable field initialization happens before the POSTINITIALIZE notification (which is -->
     <#-- what runs user `_init` through the constructor chain), so virtual calls inside `_init` -->
-    <#-- already dispatch through a valid table. Four cases (§2.3): no field at all / NULL for -->
+    <#-- already dispatch through a valid table. Four cases: no field at all / NULL for -->
     <#-- side branches / this class's own instance / the nearest non-pass-through ancestor's -->
     <#-- instance value for pass-through classes — driven entirely by the planner. -->
     <#assign vtableFieldInit = helper.renderVtableFieldInitExpr(classDef.name)>

@@ -10,7 +10,7 @@ import org.jetbrains.annotations.NotNull;
 import java.util.EnumSet;
 import java.util.List;
 
-/// C code generator for `CALL_SUPER_METHOD` (vtable plan §2.5 / Step 5).
+/// C code generator for `CALL_SUPER_METHOD`.
 ///
 /// A super call names the FIXED ancestor implementation selected by `BackendMethodCallResolver
 /// .resolveSuper` from the lexical parent of the class being generated: GDCC owners emit a direct

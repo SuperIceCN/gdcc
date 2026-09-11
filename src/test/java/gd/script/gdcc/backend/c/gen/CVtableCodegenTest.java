@@ -29,8 +29,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/// Golden anchoring for Step 2 vtable layout emission (virtual_override_vtable_implementation.md
-/// §2.2/§2.3/§2.7): entry.h typedefs, the root `_vtable` field, accessors, trampolines, vtable
+/// Golden anchoring for vtable layout emission: entry.h typedefs, the root `_vtable` field,
+/// accessors, trampolines, vtable
 /// instances and the four create_instance initialization branches. Positive cases pin the exact
 /// symbol shapes and value/typedef-chain separation; negative cases pin the absence of symbols
 /// for slotless/pass-through classes and the conditional accessor conflict registration.
@@ -196,7 +196,7 @@ public class CVtableCodegenTest {
     @Test
     @DisplayName("A(root, no methods)→B(introduces m1)→C(introduces m2)→D(overrides both): consecutive introducers never skip")
     void consecutiveIntroducersChainTypedefsAndInstances() throws Exception {
-        // §2.2 four-level mixed chain: consecutive introducers must embed the ADJACENT
+        // Four-level mixed chain: consecutive introducers must embed the ADJACENT
         // introducer's typedef (C embeds gdcc_B_vtable, never the more distant A).
         var classA = newClass("MxA", "Node");
         var classB = newClass("MxB", "MxA", newVoidInstanceMethod("MxB", "m1"));
@@ -213,7 +213,7 @@ public class CVtableCodegenTest {
         var cTypedef = resolveBlockBody(hCode, "typedef struct gdcc_MxC_vtable {");
         assertOrdered(cTypedef, "gdcc_MxB_vtable _super;", "void (*m_m2)(gdcc_MxC_fat_ptr $self);");
 
-        // Mid-chain introduction (§2.2): the slotless root still owns the field and writes
+        // Mid-chain introduction: the slotless root still owns the field and writes
         // NULL; D (override-only) reuses C's typedef with its own trampolines.
         assertCreateInstanceWrites(cCode, "MxA", "self->_vtable = NULL;");
         assertCreateInstanceWrites(cCode, "MxB", "self->_super._vtable = &gdcc_MxB_vtable_inst;");
@@ -327,7 +327,7 @@ public class CVtableCodegenTest {
     // ==== Fixture helpers ====
 
     @Test
-    @DisplayName("three-level chain with a mid-layer call site: end-to-end vtable dispatch (Step 4, §2.6)")
+    @DisplayName("three-level chain with a mid-layer call site: end-to-end vtable dispatch")
     void threeLevelChainWithMidLayerCallSiteGeneratesVtableDispatchEndToEnd() throws Exception {
         var classA = newClass("GeA", "Node", newEchoIntMethod("GeA", "foo"));
         var classB = newClass("GeB", "GeA", newEchoIntMethod("GeB", "foo"));
@@ -339,7 +339,7 @@ public class CVtableCodegenTest {
         var fatPtrHeader = generatedFileText(files, "object_fat_ptr_types.h");
 
         // Call site (owner GeB != introducer GeA): the receiver is materialized once as the
-        // introducer fat self, then callee + first arg both read the temp (§2.6).
+        // introducer fat self, then callee + first arg both read the temp.
         var callSiteBody = resolveFunctionBodyByPrefix(cCode, "GeHost_call_foo_on_mid(");
         assertOrdered(callSiteBody,
                 "gdcc_GeA_fat_ptr __gdcc_tmp_vt_recv_0 = gdcc_GeB_fat_ptr_upcast_to_GeA($child);",
@@ -347,15 +347,15 @@ public class CVtableCodegenTest {
         assertFalse(callSiteBody.contains("GeB_foo("), callSiteBody);
         assertFalse(callSiteBody.contains("GeA_foo("), callSiteBody);
 
-        // The slot member read at the call site is backed by real per-class tables (Step 2
-        // integration): B and C override foo through trampolines in their own instances.
+        // The slot member read at the call site is backed by real per-class tables:
+        // B and C override foo through trampolines in their own instances.
         assertContainsAll(cCode,
                 "static const gdcc_GeA_vtable gdcc_GeA_vtable_inst = { .m_foo = GeA_foo };",
                 "static const gdcc_GeA_vtable gdcc_GeB_vtable_inst = { .m_foo = gdcc_GeB_vslot_foo };",
                 "static const gdcc_GeA_vtable gdcc_GeC_vtable_inst = { .m_foo = gdcc_GeC_vslot_foo };");
 
-        // The receiver→introducer upcast helper flows through the regular collector channel
-        // (§2.6 item 5): no call-site-specific collection mechanism is needed.
+        // The receiver→introducer upcast helper flows through the regular collector channel:
+        // no call-site-specific collection mechanism is needed.
         assertTrue(fatPtrHeader.contains("gdcc_GeB_fat_ptr_upcast_to_GeA("), fatPtrHeader);
     }
 

@@ -4,7 +4,7 @@
 - 更新时间：2026-09-10
 - 适用范围：`super.m(...)` 与裸 `super(...)` 两种 GDScript super 调用形态的前端解析、事实发布与 lowering。
 - 关联文档：
-    - `../backend/virtual_override_vtable_implementation.md`（Step 6/7 为本文的实施记录；§2.5 为后端 `CALL_SUPER_METHOD` 合同）
+    - `../backend/virtual_override_vtable_implementation.md`（§7 为后端 `CALL_SUPER_METHOD` 合同）
     - `frontend_resolution_pipeline_implementation.md`（阶段 owner 边界）
     - `frontend_dynamic_call_lowering_implementation.md`（published fact 消费合同）
     - `superclass_canonical_name_contract.md`（canonical 父类名来源）

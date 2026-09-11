@@ -1,7 +1,7 @@
 class_name VtSiblingBranch
 extends Node
 
-# Sibling-branch anchor (Step 4 scenario 5): Right does not override score(), so calls on a
+# Sibling-branch anchor: Right does not override score(), so calls on a
 # Right-typed receiver stay on the direct call path to the inherited Base implementation even
 # though the slot exists for the Left branch. Base-typed receivers still dispatch indirectly.
 class Base extends RefCounted:

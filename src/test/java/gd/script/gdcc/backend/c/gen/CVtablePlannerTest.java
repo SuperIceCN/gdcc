@@ -517,8 +517,8 @@ class CVtablePlannerTest {
     }
 
     @Test
-    @DisplayName("unregistered GDCC parents fall back to slotless planning without failing")
-    void unregisteredGdccParentFallsBackToSlotlessPlanning() {
+    @DisplayName("unregistered GDCC parents are planned as hierarchy roots without failing")
+    void unregisteredGdccParentPlansAsHierarchyRoot() {
         // Both classes are in the module list but neither is registered: the edge is invisible.
         var base = newClass("TolBase", "Node", newInstanceMethod("TolBase", "foo"));
         var leaf = newClass("TolLeaf", "TolBase", newInstanceMethod("TolLeaf", "foo"));

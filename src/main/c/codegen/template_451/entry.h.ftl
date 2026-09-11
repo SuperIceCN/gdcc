@@ -69,7 +69,7 @@ struct ${classDef.name} {
         <#-- The vtable pointer physically exists only in the root segment and only when the -->
         <#-- whole hierarchy carries at least one slot; subclasses share it through the -->
         <#-- offset-0 wrapper embedding. `const void*` sidesteps typedef-order and empty-struct -->
-        <#-- portability concerns (§2.2). -->
+        <#-- portability concerns. -->
         <#if helper.requiresVtableField(classDef.name)>
         const void* _vtable;
         </#if>

@@ -1,7 +1,7 @@
 class_name VtThreeLevelChain
 extends Node
 
-# Vtable dispatch anchor (Step 4 scenarios 1-3): a root/mid/leaf override chain observed through
+# Vtable dispatch anchor: a root/mid/leaf override chain observed through
 # root-, mid-, and leaf-typed receivers. Root-typed receivers must dispatch indirectly to the
 # most-derived override, a mid-typed receiver holding a leaf exercises owner != introducer
 # (rank is introduced by Root but owned by Mid at that static type), and a leaf-typed receiver

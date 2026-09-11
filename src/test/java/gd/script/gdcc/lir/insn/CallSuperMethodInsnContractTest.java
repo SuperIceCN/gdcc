@@ -18,7 +18,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 /// Anchors the frozen LIR contract for `call_super_method`
-/// (`gdcc_low_ir.md` §Call Instructions; vtable plan Step 5).
+/// (`gdcc_low_ir.md` §Call Instructions).
 ///
 /// Covers opcode shape, `(method_name, object, args...)` operands, serialize/parse round-trip,
 /// and negative operand-count / operand-kind cases.

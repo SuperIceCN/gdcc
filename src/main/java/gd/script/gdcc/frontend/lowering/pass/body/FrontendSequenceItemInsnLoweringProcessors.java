@@ -826,8 +826,7 @@ final class FrontendSequenceItemInsnLoweringProcessors {
 
         /// `super` calls share the exact-instance receiver/argument materialization, but emit
         /// `CALL_SUPER_METHOD` so the backend resolves the nearest ancestor implementation from the
-        /// lexical superclass and bypasses vtable dispatch
-        /// (`virtual_override_vtable_implementation.md` §2.5). The receiver is always the
+        /// lexical superclass and bypasses vtable dispatch. The receiver is always the
         /// current-class `self` alias, so no reverse-commit writeback route applies.
         private @NotNull LirBasicBlock lowerSuperMethodCall(
                 @NotNull FrontendBodyLoweringSession session,

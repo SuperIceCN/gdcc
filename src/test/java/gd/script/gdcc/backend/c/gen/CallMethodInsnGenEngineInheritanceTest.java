@@ -165,7 +165,7 @@ class CallMethodInsnGenEngineInheritanceTest {
 
         var entrySource = Files.readString(tempDir.resolve("entry.c"));
 
-        // Polymorphic call sites (§2.6): indirect through the INTRODUCER accessor; the mid-typed
+        // Polymorphic call sites: indirect through the INTRODUCER accessor; the mid-typed
         // receiver is upcast to the root fat type at materialization (owner != introducer).
         var midCallBody = resolveFunctionBody(entrySource, "GDVtableCallHostNode_call_foo_as_mid(");
         assertTrue(midCallBody.contains(
@@ -177,7 +177,7 @@ class CallMethodInsnGenEngineInheritanceTest {
         assertFalse(midCallBody.contains("GDVtableMidWorker_foo("), midCallBody);
 
         // Devirtualization anchors: final-overrider and sibling call sites stay direct despite
-        // the slot existing (R4 bracket clause / sibling rule in §2.1).
+        // the slot existing (final-overrider / sibling-branch rules).
         var leafCallBody = resolveFunctionBody(entrySource, "GDVtableCallHostNode_call_foo_as_leaf(");
         assertTrue(leafCallBody.contains("GDVtableLeafWorker_foo($leaf)"), leafCallBody);
         assertFalse(leafCallBody.contains("_class_vtable("), leafCallBody);
@@ -253,7 +253,7 @@ class CallMethodInsnGenEngineInheritanceTest {
     }
 
     /// `name(param: ParamType) -> int`: `result = param.<targetMethod>()`. The receiver's static
-    /// type decides direct vs vtable-indirect dispatch (§2.6), which is what each scenario pins.
+    /// type decides direct vs vtable-indirect dispatch, which is what each scenario pins.
     private static LirFunctionDef newCallTargetMethod(GdObjectType selfType, String name,
                                                       String paramName, String paramTypeName, String targetMethod) {
         var func = newMethod(name, GdIntType.INT, selfType);

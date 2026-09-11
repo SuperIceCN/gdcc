@@ -24,8 +24,7 @@ import java.util.Objects;
 /// owns exactly that start-point computation plus the fail-closed target checks; callers stay
 /// responsible for argument typing, fact publication, and diagnostics anchoring.
 ///
-/// Fail-closed rules (aligned with the backend `CALL_SUPER_METHOD` contract,
-/// `virtual_override_vtable_implementation.md` §2.5):
+/// Fail-closed rules (aligned with the backend `CALL_SUPER_METHOD` contract):
 /// - the enclosing class must have a superclass
 /// - `_init` is rejected: GDCC constructors chain the parent `_init` automatically
 ///   (`entry.c.ftl` `class_constructor`), so an explicit super constructor call would double-run it

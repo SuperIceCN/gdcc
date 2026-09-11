@@ -33,11 +33,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/// Golden tests for `CALL_SUPER_METHOD` (vtable plan §2.5 / Step 5). A super call always names the
+/// Golden tests for `CALL_SUPER_METHOD`. A super call always names the
 /// FIXED nearest-ancestor implementation found by lexical resolution from the containing class:
 /// direct `<Owner>_<method>` for GDCC owners (never the vtable-indirect form, even for polymorphic
 /// slots), the exact engine helper for engine owners, and the start thunk for GDCC coroutine
-/// owners. Statically unresolvable chains are compile-time errors (D2).
+/// owners. Statically unresolvable chains are compile-time errors.
 class CallSuperMethodInsnGenTest {
 
     @Test
@@ -192,7 +192,7 @@ class CallSuperMethodInsnGenTest {
     }
 
     @Test
-    @DisplayName("CALL_SUPER_METHOD on a class without a super class fails at compile time (D2)")
+    @DisplayName("CALL_SUPER_METHOD on a class without a super class fails at compile time")
     void superWithoutSuperClassShouldFailFast() {
         var rootlessClass = newClass("VtRootless", "");
         var run = newSuperCallFunction("VtRootless", "greet", null);
@@ -206,7 +206,7 @@ class CallSuperMethodInsnGenTest {
     }
 
     @Test
-    @DisplayName("CALL_SUPER_METHOD with an unresolvable super chain fails at compile time (D2)")
+    @DisplayName("CALL_SUPER_METHOD with an unresolvable super chain fails at compile time")
     void superUnresolvableChainShouldFailFast() {
         var childClass = newClass("VtChild", "Ghost");
         var run = newSuperCallFunction("VtChild", "greet", null);
@@ -221,7 +221,7 @@ class CallSuperMethodInsnGenTest {
     }
 
     @Test
-    @DisplayName("CALL_SUPER_METHOD for a method missing on a known GDCC parent fails at compile time (D2)")
+    @DisplayName("CALL_SUPER_METHOD for a method missing on a known GDCC parent fails at compile time")
     void superMethodMissingOnKnownParentShouldFailFast() {
         var baseClass = newClass("VtBase");
         baseClass.addFunction(newGdccMethod("VtBase", "greet"));
