@@ -15,6 +15,8 @@ import gd.script.gdcc.frontend.parse.GdScriptParserService;
 import gd.script.gdcc.util.StringUtil;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -23,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 
@@ -32,10 +35,23 @@ import java.util.function.Function;
 /// backend remain the sole compilation fact sources. The facade provides virtual-path normalized
 /// module VFS operations, compile configuration, task polling, and output publication without
 /// coupling itself to any transport framework.
-public final class API {
+///
+/// Lifecycle: `close()` shuts the facade down for SIGINT-style teardown — it stops the TTL
+/// cleaner permanently, cancels every unfinished compile task (queued tasks complete as CANCELED
+/// immediately, running tasks are interrupted and finish as CANCELED through the normal runner
+/// completion path so module gates are released), and waits (bounded) for runner threads to die.
+/// After close, state-mutating methods reject new work with `IllegalStateException` while
+/// read-only queries keep serving the final snapshots.
+public final class API implements AutoCloseable {
     private static final @NotNull Duration DEFAULT_COMPLETED_COMPILE_TASK_TTL = Duration.ofMinutes(30);
     private static final @NotNull Duration DEFAULT_COMPILE_TASK_SWEEP_INTERVAL = Duration.ofMinutes(1);
+    /// Total budget for runner threads to finish after close requests their cancellation; runners
+    /// respond to interruption promptly (native subprocesses are destroyed), so this only bounds
+    /// pathological cases.
+    private static final @NotNull Duration CLOSE_RUNNER_WAIT = Duration.ofSeconds(30);
     public static final int MAX_COMPILE_TASK_EVENT_PAGE_SIZE = 1_000;
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(API.class);
 
     private final @NotNull Clock clock;
     private final @NotNull GdScriptParserService parserService;
@@ -46,6 +62,10 @@ public final class API {
     private final @NotNull ConcurrentHashMap<Long, CompileTaskState> compileTasks = new ConcurrentHashMap<>();
     private final @NotNull CompileTaskCleaner compileTaskCleaner;
     private final @NotNull AtomicLong nextCompileTaskId = new AtomicLong(1);
+    private final @NotNull AtomicBoolean closed = new AtomicBoolean();
+    /// Serializes `compile(...)` admission against the close sweep so a task can never slip
+    /// between "close scanned the task table" and "close requested cancellation".
+    private final @NotNull Object lifecycleLock = new Object();
 
     public API() {
         this(
@@ -97,6 +117,7 @@ public final class API {
     }
 
     public @NotNull ModuleSnapshot createModule(@NotNull String moduleId, @NotNull String moduleName) {
+        checkOpen();
         var normalizedModuleId = normalizeModuleId(moduleId);
         var createdState = new ModuleState(
                 normalizedModuleId,
@@ -125,6 +146,7 @@ public final class API {
     }
 
     public @NotNull ModuleSnapshot deleteModule(@NotNull String moduleId) {
+        checkOpen();
         var normalizedModuleId = normalizeModuleId(moduleId);
         var managedModule = modules.get(normalizedModuleId);
         if (managedModule == null) {
@@ -147,6 +169,7 @@ public final class API {
             @NotNull String moduleId,
             @NotNull String path
     ) {
+        checkOpen();
         var normalizedModuleId = normalizeModuleId(moduleId);
         return requireManagedModule(normalizedModuleId).runExclusive(
                 normalizedModuleId,
@@ -159,6 +182,7 @@ public final class API {
             @NotNull String path,
             @NotNull String content
     ) {
+        checkOpen();
         var normalizedModuleId = normalizeModuleId(moduleId);
         return requireManagedModule(normalizedModuleId).runExclusive(
                 normalizedModuleId,
@@ -172,6 +196,7 @@ public final class API {
             @NotNull String content,
             @NotNull String displayPath
     ) {
+        checkOpen();
         var normalizedModuleId = normalizeModuleId(moduleId);
         return requireManagedModule(normalizedModuleId).runExclusive(normalizedModuleId, state ->
                 state.putFile(VirtualPath.parse(path), content, displayPath)
@@ -192,6 +217,7 @@ public final class API {
             @NotNull VfsEntrySnapshot.LinkKind linkKind,
             @NotNull String target
     ) {
+        checkOpen();
         var normalizedModuleId = normalizeModuleId(moduleId);
         return requireManagedModule(normalizedModuleId).runExclusive(normalizedModuleId, state ->
                 state.createLink(VirtualPath.parse(path), linkKind, target)
@@ -199,6 +225,7 @@ public final class API {
     }
 
     public @NotNull VfsEntrySnapshot deletePath(@NotNull String moduleId, @NotNull String path, boolean recursive) {
+        checkOpen();
         var normalizedModuleId = normalizeModuleId(moduleId);
         return requireManagedModule(normalizedModuleId).runExclusive(normalizedModuleId, state ->
                 state.deletePath(VirtualPath.parse(path), recursive)
@@ -231,6 +258,7 @@ public final class API {
             @NotNull String moduleId,
             @NotNull CompileOptions compileOptions
     ) {
+        checkOpen();
         var normalizedModuleId = normalizeModuleId(moduleId);
         return requireManagedModule(normalizedModuleId).runExclusive(
                 normalizedModuleId,
@@ -250,6 +278,7 @@ public final class API {
             @NotNull String moduleId,
             @NotNull Map<String, String> topLevelCanonicalNameMap
     ) {
+        checkOpen();
         var normalizedModuleId = normalizeModuleId(moduleId);
         return requireManagedModule(normalizedModuleId).runExclusive(normalizedModuleId, state ->
                 state.setTopLevelCanonicalNameMap(topLevelCanonicalNameMap)
@@ -275,6 +304,7 @@ public final class API {
     /// a queued or active compile of the same module to finish first, and it never touches the
     /// module's last compile result.
     public @NotNull AnalysisResult analyze(@NotNull String moduleId, @NotNull AnalyzeOptions analyzeOptions) {
+        checkOpen();
         var normalizedModuleId = normalizeModuleId(moduleId);
         var managedModule = requireManagedModule(normalizedModuleId);
         var options = Objects.requireNonNull(analyzeOptions, "analyzeOptions must not be null");
@@ -288,42 +318,48 @@ public final class API {
     /// queue progress, running stages, and final completion. Completed tasks stay queryable only
     /// until their retention TTL expires.
     public long compile(@NotNull String moduleId) {
-        var normalizedModuleId = normalizeModuleId(moduleId);
-        var managedModule = requireManagedModule(normalizedModuleId);
-        var taskId = nextCompileTaskId.getAndIncrement();
-        var taskState = new CompileTaskState(taskId, normalizedModuleId, clock.instant(), compileTaskHooks);
-        compileTasks.put(taskId, taskState);
-        try {
-            managedModule.enqueueCompile(normalizedModuleId, taskId);
-        } catch (RuntimeException exception) {
-            compileTasks.remove(taskId);
-            throw exception;
+        // Admission is serialized against the close sweep: either this task is fully registered
+        // (and therefore visible to `close()` for cancellation) or close already won and the call
+        // fails instead of leaking a runner.
+        synchronized (lifecycleLock) {
+            checkOpen();
+            var normalizedModuleId = normalizeModuleId(moduleId);
+            var managedModule = requireManagedModule(normalizedModuleId);
+            var taskId = nextCompileTaskId.getAndIncrement();
+            var taskState = new CompileTaskState(taskId, normalizedModuleId, clock.instant(), compileTaskHooks);
+            compileTasks.put(taskId, taskState);
+            try {
+                managedModule.enqueueCompile(normalizedModuleId, taskId);
+            } catch (RuntimeException exception) {
+                compileTasks.remove(taskId);
+                throw exception;
+            }
+            var ownerState = managedModule.state();
+            try {
+                compileTaskCleaner.ensureRunning();
+                var thread = Thread.ofVirtual()
+                        .name("gdcc-api-compile-" + taskId)
+                        .unstarted(new CompileTaskRunner(
+                                clock,
+                                parserService,
+                                projectBuilder,
+                                taskState,
+                                () -> managedModule.awaitCompileTurn(normalizedModuleId, taskId),
+                                () -> freezeCompileTaskRequest(ownerState),
+                                result -> {
+                                    ownerState.setLastCompileResult(result);
+                                    managedModule.finishCompile(taskId);
+                                }
+                        ));
+                taskState.attachRunnerThread(thread);
+                thread.start();
+            } catch (RuntimeException exception) {
+                compileTasks.remove(taskId);
+                managedModule.finishCompile(taskId);
+                throw exception;
+            }
+            return taskId;
         }
-        var ownerState = managedModule.state();
-        try {
-            compileTaskCleaner.ensureRunning();
-            var thread = Thread.ofVirtual()
-                    .name("gdcc-api-compile-" + taskId)
-                    .unstarted(new CompileTaskRunner(
-                            clock,
-                            parserService,
-                            projectBuilder,
-                            taskState,
-                            () -> managedModule.awaitCompileTurn(normalizedModuleId, taskId),
-                            () -> freezeCompileTaskRequest(ownerState),
-                            result -> {
-                                ownerState.setLastCompileResult(result);
-                                managedModule.finishCompile(taskId);
-                            }
-                    ));
-            taskState.attachRunnerThread(thread);
-            thread.start();
-        } catch (RuntimeException exception) {
-            compileTasks.remove(taskId);
-            managedModule.finishCompile(taskId);
-            throw exception;
-        }
-        return taskId;
     }
 
     /// Returns the latest snapshot for one compile task started by `compile(...)`. Once the retention
@@ -336,6 +372,7 @@ public final class API {
     /// module reservation immediately; running tasks are interrupted and complete as canceled once
     /// the compile runner reaches an interruptible point.
     public @NotNull CompileTaskSnapshot cancelCompileTask(long taskId) {
+        checkOpen();
         var taskState = requireCompileTaskState(taskId);
         if (!taskState.requestCancellation()) {
             return taskState.snapshot();
@@ -398,7 +435,65 @@ public final class API {
     }
 
     public void clearCompileTaskEvents(long taskId) {
+        checkOpen();
         requireCompileTaskState(taskId).clearEvents();
+    }
+
+    /// Shuts the facade down (idempotent). Queued tasks are completed as CANCELED synchronously;
+    /// running tasks are interrupted — their runners notice the cancellation, finish through the
+    /// normal completion path (last-result writeback and module-gate release included) and die.
+    /// Runner threads are joined with a bounded total budget; leftovers are logged, not hung on.
+    @Override
+    public void close() {
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        // Stop the TTL cleaner first and permanently so it cannot resurrect mid-teardown.
+        compileTaskCleaner.stop();
+        synchronized (lifecycleLock) {
+            for (var entry : compileTasks.entrySet()) {
+                var taskState = entry.getValue();
+                if (!taskState.requestCancellation()) {
+                    continue;
+                }
+                var snapshot = taskState.snapshot();
+                var managedModule = modules.get(snapshot.moduleId());
+                if (managedModule != null && managedModule.cancelQueuedCompile(entry.getKey())) {
+                    var result = canceledResult(snapshot);
+                    if (taskState.completeCanceled(clock.instant(), result)) {
+                        managedModule.state().setLastCompileResult(result);
+                    }
+                }
+                taskState.interruptRunner();
+            }
+        }
+        var deadlineNanos = System.nanoTime() + CLOSE_RUNNER_WAIT.toNanos();
+        var unfinished = 0;
+        for (var taskState : compileTasks.values()) {
+            // Join every task's runner, not only still-running ones: a queued task canceled
+            // synchronously above still owns a started runner thread parked on the module gate,
+            // and it must be reaped before close returns. `Duration.ZERO` remainders are an
+            // immediate liveness check, never an unbounded wait.
+            var remaining = Duration.ofNanos(Math.max(0L, deadlineNanos - System.nanoTime()));
+            try {
+                if (!taskState.awaitRunner(remaining)) {
+                    unfinished++;
+                }
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                unfinished++;
+                break;
+            }
+        }
+        if (unfinished > 0) {
+            LOGGER.warn("API closed with {} compile task(s) still running after cancellation", unfinished);
+        }
+    }
+
+    private void checkOpen() {
+        if (closed.get()) {
+            throw new IllegalStateException("API is closed");
+        }
     }
 
     private @NotNull ManagedModule requireManagedModule(@NotNull String moduleId) {

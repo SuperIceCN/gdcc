@@ -63,7 +63,7 @@ final class AnalysisRunner {
                     analyzeOptions,
                     sourcePaths,
                     EMPTY_DIAGNOSTICS,
-                    "Module '" + request.moduleId() + "' has no .gd source files to analyze"
+                    "Module '" + request.moduleId() + "' has no .gd/.gd3 source files to analyze"
             );
         }
 

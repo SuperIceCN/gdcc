@@ -1,10 +1,11 @@
 <#-- @ftlvariable name="module" type="gd.script.gdcc.lir.LirModule" -->
 <#-- @ftlvariable name="helper" type="gd.script.gdcc.backend.c.gen.CGenHelper" -->
 <#-- @ftlvariable name="inheritanceOrderedClassDefs" type="java.util.List<gd.script.gdcc.lir.LirClassDef>" -->
+<#-- @ftlvariable name="headerGuardPrefix" type="java.lang.String" -->
 <#include "trim.ftl">
 <#include "func.ftl">
-#ifndef GDEXTENSION_${module.moduleName?upper_case}_ENTRY_H
-#define GDEXTENSION_${module.moduleName?upper_case}_ENTRY_H
+#ifndef ${headerGuardPrefix}_ENTRY_H
+#define ${headerGuardPrefix}_ENTRY_H
 
 #include <godot_binding.h>
 static GDExtensionClassLibraryPtr class_library = NULL;
@@ -879,4 +880,4 @@ static void gdcc_bind_method${helper.renderFuncBindName(bindingData)}(
 }
 </#list>
 
-#endif //GDEXTENSION_${module.moduleName?upper_case}_ENTRY_H
+#endif //${headerGuardPrefix}_ENTRY_H

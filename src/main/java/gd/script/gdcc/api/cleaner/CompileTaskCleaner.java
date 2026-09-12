@@ -2,6 +2,7 @@ package gd.script.gdcc.api.cleaner;
 
 import gd.script.gdcc.api.task.CompileTaskState;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -16,6 +17,9 @@ public final class CompileTaskCleaner {
     private final @NotNull Duration completedCompileTaskTtl;
     private final @NotNull Duration sweepInterval;
     private final @NotNull AtomicBoolean running = new AtomicBoolean();
+    private final @NotNull AtomicBoolean stopped = new AtomicBoolean();
+    // Null until the first sweep thread starts; stop() must never interrupt the calling thread.
+    private volatile @Nullable Thread cleanerThread;
 
     public CompileTaskCleaner(
             @NotNull Clock clock,
@@ -33,6 +37,9 @@ public final class CompileTaskCleaner {
     /// their event logs must age out instead of leaking memory and enlarging the polling surface
     /// forever.
     public void ensureRunning() {
+        if (stopped.get()) {
+            return;
+        }
         if (!running.compareAndSet(false, true)) {
             return;
         }
@@ -40,11 +47,14 @@ public final class CompileTaskCleaner {
             Thread.ofVirtual()
                     .name("gdcc-api-compile-cleaner-" + System.identityHashCode(this))
                     .start(() -> {
+                        cleanerThread = Thread.currentThread();
                         try {
                             run();
                         } finally {
                             running.set(false);
-                            if (!compileTasks.isEmpty()) {
+                            // Never restart after stop(): the API is closing and the cleaner must
+                            // stay down instead of resurrecting on a non-empty task table.
+                            if (!stopped.get() && !compileTasks.isEmpty()) {
                                 ensureRunning();
                             }
                         }
@@ -55,8 +65,18 @@ public final class CompileTaskCleaner {
         }
     }
 
+    /// Permanently stops the cleaner (idempotent): the sweep thread is interrupted so it exits at
+    /// once, and later `ensureRunning()` calls become no-ops.
+    public void stop() {
+        stopped.set(true);
+        var thread = cleanerThread;
+        if (thread != null) {
+            thread.interrupt();
+        }
+    }
+
     private void run() {
-        while (true) {
+        while (!stopped.get()) {
             collectExpiredTasks();
             if (compileTasks.isEmpty()) {
                 return;

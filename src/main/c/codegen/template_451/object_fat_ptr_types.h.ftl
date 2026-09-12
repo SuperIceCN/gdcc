@@ -1,8 +1,8 @@
 <#-- @ftlvariable name="module" type="gd.script.gdcc.lir.LirModule" -->
 <#-- @ftlvariable name="helper" type="gd.script.gdcc.backend.c.gen.CGenHelper" -->
 <#-- @ftlvariable name="objectFatPtrSpecs" type="java.util.List<gd.script.gdcc.backend.c.gen.fatptr.ObjectFatPtrSpec>" -->
-#ifndef GDEXTENSION_${module.moduleName?upper_case}_OBJECT_FAT_PTR_TYPES_H
-#define GDEXTENSION_${module.moduleName?upper_case}_OBJECT_FAT_PTR_TYPES_H
+#ifndef ${headerGuardPrefix}_OBJECT_FAT_PTR_TYPES_H
+#define ${headerGuardPrefix}_OBJECT_FAT_PTR_TYPES_H
 
 #include <godot_binding.h>
 #include <gdcc_helper.h>

@@ -2,14 +2,14 @@
 
 > 本文档是将 `gd.script.gdcc.api.API` 通过 HTTP JSON-RPC 暴露出去、以及消费该服务的
 > Godot 编辑器插件（GDScript 客户端）的实施计划。它是一份**计划**，尚不是事实源：
-> 除步骤 A0 对现有 API 源码收集的修改外，文中描述的代码目前都不存在。实现落地后，
-> 必须按 `doc/module_impl/common_rules.md` 的要求将本文档转换为事实源文档（或按
-> 子系统拆分），并移除步骤/验收章节。
+> 步骤 A0–A5（Java RPC 服务端）已落地，步骤 B/C（编辑器插件、文档转换）描述的代码
+> 目前仍不存在。全部实现落地后，必须按 `doc/module_impl/common_rules.md` 的要求将
+> 本文档转换为事实源文档（或按子系统拆分），并移除步骤/验收章节。
 
 ## 文档状态
 
-- 状态：实施计划——待实现
-- 更新日期：2026-09-11
+- 状态：实施计划——A0–A5 已完成（2026-09-12）；B/C 步骤待实现
+- 更新日期：2026-09-12
 - 范围：
   - `src/main/java/gd/script/gdcc/api/ModuleState.java`（源码收集过滤，步骤 A0）
     及相关阶段文案/错误消息与 API 测试
@@ -722,6 +722,7 @@ fixture，列入 §8 后续工作。
 
 ### 步骤 A0 — `.gd3` 源码收集根源修复
 
+- 状态：已完成（2026-09-12；`ApiAnalyzeTest`/`ApiCompileDiagnosticsTest` 通过）
 - 交付物：
   - `ModuleState.rememberSource()` 的扩展名过滤从 `.gd` 扩展为 `.gd` + `.gd3`
     （compile 与 analyze 共用 `freezeCompileRequest()`，单点修改），并同步
@@ -764,6 +765,7 @@ fixture，列入 §8 后续工作。
 
 ### 步骤 A1 — Codec
 
+- 状态：已完成（2026-09-12；`RpcJsonCodecTest` 通过）
 - 交付物：`gd/script/gdcc/rpc/RpcJsonCodec.java`，含 Gson 配置与
   Path/Instant/VfsEntrySnapshot 适配器；所有方法的 param record（可放在一个嵌套的
   `RpcParams.java` 持有者中）。
@@ -773,6 +775,7 @@ fixture，列入 §8 后续工作。
 
 ### 步骤 A2 — Dispatcher
 
+- 状态：已完成（2026-09-12；`JsonRpcDispatcherTest` 32 个测试通过，25 个方法全部路由，§2.4 每个错误码均有钉死测试）
 - 交付物：`JsonRpcDispatcher.java`（解析信封 → 路由 → 调用 → 编码）、
   `JsonRpcMethodRegistry.java`（§2.2 的方法表）、§2.4 的异常→错误映射。
 - 测试：`JsonRpcDispatcherTest`（§4.1）。
@@ -781,6 +784,7 @@ fixture，列入 §8 后续工作。
 
 ### 步骤 A3 — HTTP 服务端与 `serve` 命令
 
+- 状态：已完成（2026-09-12；`RpcServerHttpTest`/`RpcServeCommandTest`/`MainEntrypointTest` 通过）
 - 交付物：`JsonRpcServer.java`、`JsonRpcHttpHandler.java`（含 §2.1 的计数有界
   body 读取）、`RpcServeCommand.java`、`Main.java` 路由、`module-info.java` 的
   `requires jdk.httpserver;`。
@@ -791,12 +795,14 @@ fixture，列入 §8 后续工作。
 
 ### 步骤 A4 — HTTP 上的 API 往返
 
+- 状态：已完成（2026-09-12；`RpcApiRoundTripHttpTest` 通过）
 - 交付物：无（仅装配）。
 - 测试：`RpcApiRoundTripHttpTest`（§4.2）。
 - 验收：`script/run-gradle-targeted-tests.sh --tests RpcApiRoundTripHttpTest` 通过。
 
 ### 步骤 A5 — HTTP 上的编译（zig 门控）
 
+- 状态：已完成（2026-09-12；zig 存在时 `RpcCompileHttpIntegrationTest` 通过，否则 `Assumptions.abort` 跳过）
 - 测试：`RpcCompileHttpIntegrationTest`（§4.3）。
 - 验收：zig 存在时
   `script/run-gradle-targeted-tests.sh --tests RpcCompileHttpIntegrationTest` 通过；

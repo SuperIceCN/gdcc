@@ -29,6 +29,34 @@ class MainEntrypointTest {
         assertEquals("", result.errText());
     }
 
+    @Test
+    void runWithoutArgsReachesCliUsageError() {
+        var result = runWithCapturedStreams();
+
+        // A bare `gdcc` must land on picocli's missing-parameter usage error, not on an
+        // `ArrayIndexOutOfBoundsException` in the first-arg routing.
+        assertEquals(2, result.exitCode());
+        assertTrue(result.errText().contains("Usage: gdcc"));
+    }
+
+    @Test
+    void runRoutesServeToTheRpcEntrypoint() {
+        var result = runWithCapturedStreams("serve", "--help");
+
+        assertEquals(0, result.exitCode());
+        assertTrue(result.outText().contains("Usage: serve"));
+    }
+
+    @Test
+    void runKeepsUnknownFirstArgOnTheCliPath() {
+        var result = runWithCapturedStreams("frobnicate");
+
+        // `frobnicate` is not a routing keyword, so the CLI treats it as an input file and fails
+        // its own host-input validation.
+        assertEquals(2, result.exitCode());
+        assertTrue(result.errText().contains("gdcc: Input file does not exist: frobnicate"));
+    }
+
     private static CapturedRun runWithCapturedStreams(String... args) {
         var originalOut = System.out;
         var originalErr = System.err;

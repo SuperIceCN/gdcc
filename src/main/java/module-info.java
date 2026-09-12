@@ -5,6 +5,7 @@ open module gdcc {
     requires freemarker;
     requires info.picocli;
     requires java.xml;
+    requires jdk.httpserver;
     requires org.slf4j;
     requires org.jetbrains.annotations;
     requires jAstyle;
