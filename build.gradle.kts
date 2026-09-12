@@ -70,6 +70,27 @@ val benchmark by tasks.registering(JavaExec::class) {
     mainClass.set("gd.script.gdcc.test_suite.benchmark.GdScriptBenchmarkMain")
 }
 
+val buildAddonNative by tasks.registering(JavaExec::class) {
+    group = "build"
+    description = "Builds the editor addon native library for the host platform and installs it into src/editor_addon."
+
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("gd.script.gdcc.rpc.EditorAddonProjectInstaller")
+    workingDir = rootDir
+}
+
+val buildAddonAllPlatform by tasks.registering(JavaExec::class) {
+    group = "build"
+    description = "Builds the editor addon native libraries for Windows x86_64 and Linux x86_64/AArch64 and installs them into src/editor_addon."
+
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("gd.script.gdcc.rpc.EditorAddonProjectInstaller")
+    args("WINDOWS_X86_64", "LINUX_X86_64", "LINUX_AARCH64")
+    workingDir = rootDir
+}
+
 val generateVersionResource by tasks.registering {
     val versionFile = generatedVersionResources.map { it.file("gdcc-version.properties") }
     outputs.file(versionFile)

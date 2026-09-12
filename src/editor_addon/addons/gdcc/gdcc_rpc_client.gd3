@@ -1,0 +1,226 @@
+@tool
+class_name GdccRpcClient
+extends Node
+
+# JSON-RPC 2.0 client for the local gdcc compiler service (`gdcc serve`).
+#
+# This file is the bootstrap compile target of the gdcc editor addon: the engine never loads
+# `.gd3` sources, so the class is registered exclusively by the compiled GDExtension and cannot
+# collide with any script class. The public API shape is dictated by gdcc's cross-boundary
+# coroutine limits: no function in this file may be a coroutine, because interpreted callers
+# cannot reliably await a compiled coroutine. Every request therefore returns a per-request
+# PendingRequest object; interpreted callers `await pending.completed` inside the same
+# synchronous execution segment to receive the normalized response Dictionary.
+
+class PendingRequest extends RefCounted:
+    signal completed(response: Dictionary)
+
+    # Self-emission is the only emit form with a direct interop anchor; the client never emits
+    # this signal on another object's behalf.
+    func _finish(response: Dictionary) -> void:
+        completed.emit(response)
+
+
+var host: String = "127.0.0.1"
+var port: int = 6099
+# Per-request timeout in seconds. Without it a server that accepts the connection but never
+# responds would pin `_inflight` forever — the frame pump would stop dequeuing and every
+# caller would hang inside a single `await`. On expiry the engine still completes the request
+# asynchronously (RESULT_TIMEOUT), which the handler normalizes as a transport failure.
+var request_timeout: float = 30.0
+
+# Created in `_ready` with an explicit type so engine calls stay on the exact route. The client
+# node must be inside the SceneTree before any request: `HTTPRequest.request()` fails with
+# ERR_UNCONFIGURED otherwise.
+var http: HTTPRequest
+# Queue of unsent `{pending, id, method, params}` items; the single HTTPRequest node plus the
+# `_inflight` slot serialize the wire, so no busy flag or mutex is needed.
+var _queue: Array = []
+var _inflight: PendingRequest = null
+# Synchronous-failure completions parked until the next frame (see `_pump_next`).
+var _pending_finish: Array = []
+# Monotonic JSON-RPC protocol id; used only inside the envelope, never exposed to callers.
+var _next_id: int = 1
+
+
+func _ready() -> void:
+    http = HTTPRequest.new()
+    http.timeout = request_timeout
+    add_child(http)
+    http.request_completed.connect(_on_request_completed)
+    var tree: SceneTree = get_tree()
+    # Persistent connect: the frame pump is the liveness guarantee of the whole client.
+    tree.process_frame.connect(_on_process_frame)
+
+
+# Enqueues one JSON-RPC request and returns its pending object. Deliberately does NOT send,
+# emit, or pump: plain signals have no result cache, so every completion path (engine signal
+# stack or frame pump) must fire strictly after the caller had the chance to `await` in the
+# same synchronous segment.
+func call_rpc(method: String, params: Dictionary = {}) -> PendingRequest:
+    var pending: PendingRequest = PendingRequest.new()
+    _queue.push_back({"pending": pending, "id": _next_id, "method": method, "params": params})
+    _next_id += 1
+    return pending
+
+
+# Typed convenience wrappers over `call_rpc`; wire keys follow the server's method contract
+# exactly (`options.set` replaces the whole snapshot, so `compileOptions` must be the complete
+# `options.get` shape with edits applied).
+func ping() -> PendingRequest:
+    return call_rpc("server.ping")
+
+
+func server_info() -> PendingRequest:
+    return call_rpc("server.info")
+
+
+func create_module(moduleId: String, moduleName: String) -> PendingRequest:
+    return call_rpc("module.create", {"moduleId": moduleId, "moduleName": moduleName})
+
+
+func delete_module(moduleId: String) -> PendingRequest:
+    return call_rpc("module.delete", {"moduleId": moduleId})
+
+
+func put_file(moduleId: String, path: String, content: String, displayPath: String = "") -> PendingRequest:
+    var params: Dictionary = {"moduleId": moduleId, "path": path, "content": content}
+    if displayPath != "":
+        params["displayPath"] = displayPath
+    return call_rpc("vfs.putFile", params)
+
+
+func read_file(moduleId: String, path: String) -> PendingRequest:
+    return call_rpc("vfs.readFile", {"moduleId": moduleId, "path": path})
+
+
+func list_directory(moduleId: String, path: String) -> PendingRequest:
+    return call_rpc("vfs.listDirectory", {"moduleId": moduleId, "path": path})
+
+
+func set_compile_options(moduleId: String, compileOptions: Dictionary) -> PendingRequest:
+    return call_rpc("options.set", {"moduleId": moduleId, "compileOptions": compileOptions})
+
+
+func start_compile(moduleId: String) -> PendingRequest:
+    return call_rpc("compile.start", {"moduleId": moduleId})
+
+
+func get_compile_task(taskId: int) -> PendingRequest:
+    return call_rpc("compile.getTask", {"taskId": taskId})
+
+
+func cancel_compile_task(taskId: int) -> PendingRequest:
+    return call_rpc("compile.cancel", {"taskId": taskId})
+
+
+func get_last_compile_result(moduleId: String) -> PendingRequest:
+    return call_rpc("compile.getLastResult", {"moduleId": moduleId})
+
+
+func list_compile_task_events(taskId: int, startIndex: int = 0, maxCount: int = 1000, category: String = "") -> PendingRequest:
+    var params: Dictionary = {"taskId": taskId, "startIndex": startIndex, "maxCount": maxCount}
+    if category != "":
+        params["category"] = category
+    return call_rpc("compile.listEvents", params)
+
+
+func analyze(moduleId: String, includeLowering: bool = false) -> PendingRequest:
+    return call_rpc("analyze.run", {"moduleId": moduleId, "includeLowering": includeLowering})
+
+
+# Single pump site, driven exclusively by `SceneTree.process_frame`. First flushes synchronous
+# failures deferred by `_pump_next` (this frame callback is an async context, so emitting here
+# is safe), then sends the next queued request while idle. `call_rpc` never calls into this.
+func _on_process_frame() -> void:
+    while _pending_finish.size() > 0:
+        var item: Dictionary = _pending_finish[0]
+        _pending_finish.remove_at(0)
+        var flushed: PendingRequest = item["pending"] as PendingRequest
+        flushed._finish(item["response"] as Dictionary)
+    if _inflight == null and _queue.size() > 0:
+        _pump_next()
+
+
+# Dequeue first, then send: a synchronous `request()` failure never emits `request_completed`,
+# so the failure is parked in `_pending_finish` (flushed next frame, still strictly after the
+# caller's synchronous segment) and the pump immediately advances to the next queued item.
+func _pump_next() -> void:
+    var item: Dictionary = _queue[0]
+    _queue.remove_at(0)
+    var pending: PendingRequest = item["pending"] as PendingRequest
+    _inflight = pending
+    var envelope: Dictionary = {
+        "jsonrpc": "2.0",
+        "method": item["method"],
+        "params": item["params"],
+        "id": item["id"]
+    }
+    var body: String = JSON.stringify(envelope)
+    var url: String = "http://%s:%d/rpc" % [host, port]
+    var headers: PackedStringArray = PackedStringArray(["Content-Type: application/json"])
+    var err: int = http.request(url, headers, HTTPClient.METHOD_POST, body)
+    if err != OK:
+        _inflight = null
+        _pending_finish.push_back({
+            "pending": pending,
+            "response": _error_response(-1, "HTTPRequest.request failed: %s" % [err])
+        })
+        if _queue.size() > 0:
+            _pump_next()
+
+
+# Engine signal handler (async context): self-emission here is always after `call_rpc`
+# returned, so success responses complete immediately without going through `_pending_finish`.
+# Anything that is not a 200 JSON object is a transport failure; RPC errors are re-shaped but
+# keep their server code and optional `data`; transport/parse failures use client-local
+# negative codes that cannot collide with server JSON-RPC codes.
+func _on_request_completed(
+        result: int,
+        response_code: int,
+        headers: PackedStringArray,
+        body: PackedByteArray
+) -> void:
+    var pending: PendingRequest = _inflight
+    _inflight = null
+    if pending == null:
+        return
+    if result != HTTPRequest.RESULT_SUCCESS or response_code != 200:
+        pending._finish(_error_response(
+                -2, "HTTP transport failed: result=%s response_code=%s" % [result, response_code]))
+        return
+    var parsed: Variant = JSON.parse_string(body.get_string_from_utf8())
+    if typeof(parsed) != TYPE_DICTIONARY:
+        pending._finish(_error_response(-3, "Response body is not a JSON object"))
+        return
+    var envelope: Dictionary = parsed as Dictionary
+    if envelope.has("error"):
+        # The error member is external input; a misbehaving server must not crash the handler
+        # with a failed cast (which would leave the caller's `await` hanging forever).
+        if typeof(envelope["error"]) != TYPE_DICTIONARY:
+            pending._finish(_error_response(-3, "Response error member is not a JSON object"))
+            return
+        var error_object: Dictionary = envelope["error"] as Dictionary
+        # A malformed error object is a parse failure, not an RPC error: missing members or
+        # wrong member types would raise on conversion and strand the caller's await, so they
+        # are normalized to the same client-local failure instead.
+        var code_value: Variant = error_object.get("code")
+        var message_value: Variant = error_object.get("message")
+        var code_is_number: bool = typeof(code_value) == TYPE_INT or typeof(code_value) == TYPE_FLOAT
+        if not code_is_number or typeof(message_value) != TYPE_STRING:
+            pending._finish(_error_response(-3, "Response error object is malformed"))
+            return
+        var normalized_error: Dictionary = {"code": int(code_value), "message": message_value}
+        if error_object.has("data"):
+            normalized_error["data"] = error_object["data"]
+        pending._finish({"ok": false, "error": normalized_error})
+        return
+    if not envelope.has("result"):
+        pending._finish(_error_response(-4, "Response object carries neither result nor error"))
+        return
+    pending._finish({"ok": true, "result": envelope["result"]})
+
+
+# Normalized transport/parse failure shape; unlike RPC errors it carries no `data` member.
+func _error_response(code: int, message: String) -> Dictionary:
+    return {"ok": false, "error": {"code": code, "message": message}}

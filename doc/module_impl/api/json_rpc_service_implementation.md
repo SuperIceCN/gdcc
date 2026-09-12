@@ -2,13 +2,13 @@
 
 > 本文档是将 `gd.script.gdcc.api.API` 通过 HTTP JSON-RPC 暴露出去、以及消费该服务的
 > Godot 编辑器插件（GDScript 客户端）的实施计划。它是一份**计划**，尚不是事实源：
-> 步骤 A0–A5（Java RPC 服务端）已落地，步骤 B/C（编辑器插件、文档转换）描述的代码
-> 目前仍不存在。全部实现落地后，必须按 `doc/module_impl/common_rules.md` 的要求将
-> 本文档转换为事实源文档（或按子系统拆分），并移除步骤/验收章节。
+> 步骤 A0–A5（Java RPC 服务端）与 B1–B3（编辑器插件、引擎自举）已落地，步骤 C
+> （文档转换）尚未执行。全部实现落地后，必须按 `doc/module_impl/common_rules.md`
+> 的要求将本文档转换为事实源文档（或按子系统拆分），并移除步骤/验收章节。
 
 ## 文档状态
 
-- 状态：实施计划——A0–A5 已完成（2026-09-12）；B/C 步骤待实现
+- 状态：实施计划——A0–A5、B1–B3 已完成（2026-09-12）；C 步骤待实现
 - 更新日期：2026-09-12
 - 范围：
   - `src/main/java/gd/script/gdcc/api/ModuleState.java`（源码收集过滤，步骤 A0）
@@ -479,7 +479,11 @@ var port: int = 6099
   `read_file`、`list_directory`、`set_compile_options`（接受 `options.get` wire
   形状的普通 Dictionary）、`start_compile`、`get_compile_task`、
   `cancel_compile_task`、`get_last_compile_result`、`list_compile_task_events`、
-  `analyze`。wrapper 的参数名与 §2.2 保持一致。
+  `analyze`。wrapper 的参数名与 §2.2 保持一致。**解释型调用方必须显式传递全部
+  参数**：gdcc 按设计不向 ClassDB 注册默认参数值（
+  `frontend_parameter_default_implementation.md` §5.2，`default_argument_count`
+  恒 0），跨边界省略实参会被引擎以 too-few-arguments 静态拒绝；源码中的默认值
+  只对编译型调用方生效。
 - 生命周期：`PendingRequest` 是普通 `RefCounted` 对象（fresh object return 的
   ownership 合同见 `gdcc_ownership_lifecycle_spec.md`）；客户端在队列/在途槽中
   持有它直到 `_finish(...)`，调用方持有它直到 `await` 返回，双方随后各自释放，
@@ -681,8 +685,9 @@ fixture，列入 §8 后续工作。
      `rpc = await client.set_compile_options("demo", opts).completed`
      → `rpc["ok"] == true`。绝不手写残缺 options 对象，因为 `options.set` 替换
      整个快照；
-  6. `rpc = await client.analyze("demo").completed` →
-     `rpc["ok"] == true` 且 `rpc["result"]["outcome"] == "COMPLETED"`；
+   6. `rpc = await client.analyze("demo", false).completed` →
+      `rpc["ok"] == true` 且 `rpc["result"]["outcome"] == "COMPLETED"`（解释型调用方
+      必须显式传全部参数，见 §3.3 的 ClassDB 默认值条款）；
   7. `rpc = await client.start_compile("demo").completed` →
      `var task_id := int(rpc["result"]["taskId"])`；以**墙钟** deadline
      （`Time.get_ticks_msec()`，至少 60 秒，因为任务包含 zig 原生构建——现有
@@ -810,6 +815,7 @@ fixture，列入 §8 后续工作。
 
 ### 步骤 B1 — 客户端库与编译就绪门禁
 
+- 状态：已完成（2026-09-12；`EditorAddonClientAnalysisTest` 2 个测试通过：analyze + lowering 零 ERROR 诊断、§4.4 全部源码级合同断言）
 - 交付物：`src/editor_addon/addons/gdcc/gdcc_rpc_client.gd3`（顶层 `@tool`、
   `class_name GdccRpcClient`、`extends Node`、§3.3 的挂起对象 API：
   `PendingRequest` inner class + `call_rpc` 返回挂起对象、Array 队列、帧泵、
@@ -823,9 +829,11 @@ fixture，列入 §8 后续工作。
 
 ### 步骤 B2 — 插件骨架
 
+- 状态：已完成（2026-09-12；`EditorAddonClientAnalysisTest` 4 个测试通过：B1 两项 + `plugin.gd`/`gdcc_dock.gd` 解析级检查与 `plugin.cfg` 五字段检查）
 - 交付物：`plugin.cfg`、`plugin.gd`、`gdcc_dock.gd`。
-- 测试：v1 没有自动化测试，只有并入 `EditorAddonClientAnalysisTest` 的解析级检查
-  （仅解析，不 lowering，因为编辑器专用 API 不是自举目标）。
+- 测试：v1 没有引擎运行时自动化测试，只有并入 `EditorAddonClientAnalysisTest` 的解析级
+  检查（仅解析，不 lowering，因为编辑器专用 API 不是自举目标）与 `plugin.cfg` 字段
+  检查。
 - 验收：文件级验收——`plugin.cfg` 五字段齐备、`plugin.gd`/`gdcc_dock.gd` 结构与
   §3.4 一致。"启用插件 + dock ping + 编辑器空闲活性"的手工验收**不在本步骤**：
   `.gd3` 源码不被引擎加载，编辑器中的 `GdccRpcClient` 只能来自已安装的编译产物
@@ -834,10 +842,26 @@ fixture，列入 §8 后续工作。
 
 ### 步骤 B3 — 引擎自举
 
-- 交付物：`EditorAddonBootstrapEngineTest`，外加 rpc 测试包中一个小测试 helper，
-  负责项目复制（按 §4.5 排除 `.godot/`；`.gd3` 源码引擎不可见，无需删除任何
-  文件）与扩展安装（不重构 `GdScriptBenchmarkRunner`，也不复用
-  `GodotGdextensionTestRunner.prepareProject`；除非重复量很大才提取共享 helper）。
+- 状态：已完成（2026-09-12；zig + `GODOT_BIN` 存在时 `EditorAddonBootstrapEngineTest`
+  真实运行通过，全部十个 driver 步骤 `ok == true`，含 `ClassDB.instantiate` 兜底路径
+  的显式验证；两者缺一即 `Assumptions.abort` 干净跳过）
+- 交付物：`EditorAddonBootstrapEngineTest`，外加 rpc 测试包中一个小测试 helper
+  （`EditorAddonProjectInstaller`），负责项目复制（按 §4.5 排除 `.godot/`；`.gd3`
+  源码引擎不可见，无需删除任何文件）与扩展安装（不重构 `GdScriptBenchmarkRunner`，
+  也不复用 `GodotGdextensionTestRunner.prepareProject`；除非重复量很大才提取共享
+  helper）。编译产物库名为 `gdcc_for_editor`（module id；插件后续将扩展到 RPC 之外的
+  编辑器功能，源码的 `class_name GdccRpcClient` 不受库名影响）。该 helper 还提供一
+  个可手动执行的 `main` 入口（IDE 中直接运行，需从仓库根目录执行且本机有 zig）：
+  无参数时为本机平台编译并就地安装到 `src/editor_addon/addons/gdcc/`（`bin/` 产物
+  + `gdcc_for_editor.gdextension`，不写 `.godot/` 缓存——编辑器打开项目时自行
+  扫描发现扩展）；有参数时按 `TargetPlatform` 名（大小写/连字符不敏感）为每个平台
+  交叉编译，生成带 arch 限定键（`linux.debug.arm64` 等，Godot 架构名）的单一
+  `.gdextension`。对应 gradle 任务：`buildAddonNative`（本机平台）与
+  `buildAddonAllPlatform`（Windows x86_64 + Linux x86_64/AArch64），供 B3 手工
+  验收在真实编辑器中启用插件。注：在非 Windows 主机上构建 Windows 平台时，
+  `ZigCcCompiler` 会把声明的 `x86_64-windows-msvc` 替换为 `x86_64-windows-gnu`
+  并发出警告（zig 无法为 msvc 目标提供 libc；该替换同时关闭 LTO，产物仍为可正常
+  加载的自包含 GDExtension DLL，与 zig launcher 的 ABI 选择一致）。
 - 测试：`EditorAddonBootstrapEngineTest`（§4.5）。
 - 验收：`GODOT_BIN` 与 zig 存在时
   `script/run-gradle-targeted-tests.sh --tests EditorAddonBootstrapEngineTest` 通过
