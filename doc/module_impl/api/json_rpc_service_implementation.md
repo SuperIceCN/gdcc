@@ -497,10 +497,12 @@ var request_timeout: float = 30.0
     非法；`-4` = 响应既无 `result` 也无 `error`。
 - 类型化便捷 wrapper（`call_rpc` 之上的薄封装，同样返回 `PendingRequest` 的普通
   方法）：`ping`、`server_info`、`create_module`、`delete_module`、`put_file`、
-  `read_file`、`list_directory`、`set_compile_options`（接受 `options.get` wire
-  形状的普通 Dictionary）、`start_compile`、`get_compile_task`、
-  `cancel_compile_task`、`get_last_compile_result`、`list_compile_task_events`、
-  `analyze`。wrapper 的参数名与 §2.2 保持一致。**解释型调用方必须显式传递全部
+  `read_file`、`list_directory`、`get_compile_options`、`set_compile_options`
+  （接受 `options.get` wire 形状的普通 Dictionary）、`start_compile`、
+  `get_compile_task`、`cancel_compile_task`、`get_last_compile_result`、
+  `list_compile_task_events`、`analyze`。wrapper 的参数名与 §2.2 保持一致。新增的
+  wrapper 只有在重新编译安装 GDExtension 后才存在于 ClassDB；此前解释型调用方必须
+  走通用 `call_rpc("options.get", ...)` 路由（§4.4）。**解释型调用方必须显式传递全部
   参数**：gdcc 按设计不向 ClassDB 注册默认参数值（
   `frontend_parameter_default_implementation.md` §5.2，`default_argument_count`
   恒 0），跨边界省略实参会被引擎以 too-few-arguments 静态拒绝；源码中的默认值
@@ -550,10 +552,19 @@ fixture，列入 §7 后续工作。
 
 ### 4.4 插件与 Dock（仅解释执行）
 
-- `plugin.gd` 在 `_enter_tree()` 中通过
-  `add_control_to_dock(EditorPlugin.DOCK_SLOT_RIGHT_UL, dock)` 创建 dock，在
-  `_exit_tree()` 中用 `remove_control_from_docks(dock)` 加 `dock.free()` 移除，并把
-  一个 `GdccRpcClient` 节点加为自己的子节点（使客户端位于编辑器 `SceneTree` 内）。
+- `plugin.gd` 在 `_enter_tree()` 中通过 `add_control_to_bottom_panel(dock, "GDCC")`
+  创建底部面板，在 `_exit_tree()` 中用 `remove_control_from_bottom_panel(dock)` 加
+  `dock.free()` 移除，并把一个 `GdccRpcClient` 节点加为自己的子节点（使客户端位于
+  编辑器 `SceneTree` 内）。dock 入树后 `plugin.gd` 以 fire-and-forget 方式调用
+  `_dock.auto_setup_module()`：从 `application/config/name` 推导 module id（经
+  `validate_filename()` 消毒，因为它同时充当主机目录名）并 `module.create`；若服务端
+  返回 `-32001`（模块已存在）则先 `module.delete` 再重建——注意这会丢弃旧模块的
+  整个内存 VFS 与已上传源码，编辑器重开或重载插件后必须重新 Upload；
+  随后 `options.get` 取完整快照，仅把 `projectPath` 改为
+  `res://.godot/gdcc/<moduleId>` 的 globalize 结果后 `options.set` 回传，使 Compile
+  开箱可用。options 调用走通用 `call_rpc` 路由，因为已安装的编译产物 GDExtension
+  可能早于 `.gd3` 源码中的 typed options wrapper。失败只记日志（服务端可能尚未
+  启动），手动按钮不受影响。
   注意：`.gd3` 源码不被引擎加载，编辑器中的 `GdccRpcClient` 只能来自**已安装的
   编译产物 GDExtension**（§5 的安装器与 gradle 任务负责就地安装）。
 - dock 直接以 `var res: Dictionary = await client.create_module(...).completed` 的

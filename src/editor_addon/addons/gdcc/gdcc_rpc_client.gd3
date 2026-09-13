@@ -98,6 +98,10 @@ func list_directory(moduleId: String, path: String) -> PendingRequest:
     return call_rpc("vfs.listDirectory", {"moduleId": moduleId, "path": path})
 
 
+func get_compile_options(moduleId: String) -> PendingRequest:
+    return call_rpc("options.get", {"moduleId": moduleId})
+
+
 func set_compile_options(moduleId: String, compileOptions: Dictionary) -> PendingRequest:
     return call_rpc("options.set", {"moduleId": moduleId, "compileOptions": compileOptions})
 

@@ -65,3 +65,5 @@ bin/
 /.codex
 /test_project/benchmark/
 /src/editor_addon/addons/gdcc/gdcc_for_editor.gdextension
+/src/editor_addon/icon.svg.import
+/src/editor_addon/.godot/

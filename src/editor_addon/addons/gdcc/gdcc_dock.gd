@@ -10,6 +10,10 @@ extends VBoxContainer
 # or redraws the idle main loop would starve the client's frame pump and HTTPRequest. The
 # previous mode is restored once the last in-flight action finishes.
 
+# Server error code for ApiModuleAlreadyExistsException (the RPC exception mapping), used to
+# turn module creation into delete-and-recreate during plugin-load auto setup.
+const ERR_MODULE_ALREADY_EXISTS := -32001
+
 var _client: GdccRpcClient
 var _editor_interface: EditorInterface
 
@@ -297,3 +301,56 @@ func _on_cancel_pressed() -> void:
             _current_task_id = -1
     else:
         _log_error("cancel", rpc)
+
+
+# Plugin-load entry point (called once by plugin.gd after the dock enters the tree): derives
+# the module id from the Godot project name, creates the module — deleting any stale copy
+# left by a previous editor session first — then points projectPath at a per-module host
+# build dir so Compile works without manual setup. Failures are only logged: the server may
+# simply not be running yet, and the manual buttons stay usable.
+func auto_setup_module() -> void:
+    _apply_endpoint()
+    var module_id: String = str(ProjectSettings.get_setting("application/config/name", "")).strip_edges()
+    # The module id doubles as a host directory name below; replace characters that are
+    # illegal in file names instead of letting the compile fail later in createDirectories.
+    module_id = module_id.validate_filename()
+    if module_id == "":
+        module_id = "gdcc-module"
+    _module_input.text = module_id
+    _begin_busy()
+    var created: Dictionary = await _client.create_module(module_id, module_id).completed
+    if not created["ok"] and int(created["error"]["code"]) == ERR_MODULE_ALREADY_EXISTS:
+        _log("module '" + module_id + "' already exists: deleting and recreating")
+        var deleted: Dictionary = await _client.delete_module(module_id).completed
+        if deleted["ok"]:
+            created = await _client.create_module(module_id, module_id).completed
+        else:
+            # A live compile holds the module gate; leave the stale module untouched.
+            _log_error("delete module", deleted)
+            _end_busy()
+            return
+    if not created["ok"]:
+        _log_error("create module", created)
+        _end_busy()
+        return
+    _log("module created: " + module_id)
+    # options.set replaces the whole snapshot, so fetch the full options.get shape and edit
+    # only projectPath. The generic call_rpc route is used because the installed compiled
+    # extension predates the typed get_compile_options wrapper in the .gd3 source.
+    var fetched: Dictionary = await _client.call_rpc("options.get", {"moduleId": module_id}).completed
+    if not fetched["ok"]:
+        _log_error("get options", fetched)
+        _end_busy()
+        return
+    var compile_options: Dictionary = fetched["result"]
+    # Build under the project's own .godot dir: host-side generated C and native artifacts
+    # stay out of res:// so Godot never tries to import them.
+    var project_path: String = ProjectSettings.globalize_path("res://.godot/gdcc/" + module_id)
+    compile_options["projectPath"] = project_path
+    var applied: Dictionary = await _client.call_rpc(
+            "options.set", {"moduleId": module_id, "compileOptions": compile_options}).completed
+    _end_busy()
+    if applied["ok"]:
+        _log("module '" + module_id + "' ready (projectPath: " + project_path + ")")
+    else:
+        _log_error("set options", applied)

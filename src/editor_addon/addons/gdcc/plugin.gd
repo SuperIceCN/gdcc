@@ -20,11 +20,13 @@ func _enter_tree() -> void:
     add_child(_client)
     _dock = DockScript.new()
     _dock.setup(_client, get_editor_interface())
-    add_control_to_dock(EditorPlugin.DOCK_SLOT_RIGHT_UL, _dock)
+    add_control_to_bottom_panel(_dock, "GDCC")
+    # Fire-and-forget: the coroutine awaits RPC responses off this synchronous stack.
+    _dock.auto_setup_module()
 
 
 func _exit_tree() -> void:
-    remove_control_from_docks(_dock)
+    remove_control_from_bottom_panel(_dock)
     _dock.free()
     _dock = null
     _client = null
