@@ -24,11 +24,11 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/// End-to-end bootstrap proof (plan §4.5, step B3): the GDScript client library is compiled
-/// natively by gdcc itself, installed as a GDExtension into a copy of the real editor addon
-/// project, and then driven by an interpreted `SceneTree` script inside a real Godot process
-/// against a real JSON-RPC server — covering the full interop chain (compiled class connect →
-/// frame pump → HTTPRequest → pending-object `completed` self-emit → interpreted `await`).
+/// End-to-end bootstrap proof: the GDScript client library is compiled natively by gdcc
+/// itself, installed as a GDExtension into a copy of the real editor addon project, and then
+/// driven by an interpreted `SceneTree` script inside a real Godot process against a real
+/// JSON-RPC server — covering the full interop chain (compiled class connect → frame pump →
+/// HTTPRequest → pending-object `completed` self-emit → interpreted `await`).
 /// Gated on zig and `GODOT_BIN`; aborts cleanly when either is missing.
 class EditorAddonBootstrapEngineTest {
     private static final Path ADDON_PROJECT_DIR = Path.of("src/editor_addon");
@@ -83,9 +83,9 @@ class EditorAddonBootstrapEngineTest {
                 _config = parsed
                 _step("config", true)
 
-                # Explicit verification of the ClassDB fallback path (plan §4.5): the primary
-                # path below uses `GdccRpcClient.new()`, this proves the name is resolvable
-                # through ClassDB as well.
+                # Explicit verification of the ClassDB fallback path: the primary path below
+                # uses `GdccRpcClient.new()`, this proves the name is resolvable through
+                # ClassDB as well.
                 var via_classdb: Object = ClassDB.instantiate("GdccRpcClient")
                 _step("classdb_instantiate", via_classdb != null)
                 if via_classdb != null:

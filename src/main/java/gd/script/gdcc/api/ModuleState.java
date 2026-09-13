@@ -78,7 +78,8 @@ final class ModuleState {
         };
     }
 
-    /// `putFile(...)` owns the "mkdir -p parent directories" behavior promised by the RPC plan.
+    /// `putFile(...)` owns the "mkdir -p parent directories" behavior: missing parents are
+    /// created implicitly instead of requiring explicit `createDirectory(...)` calls.
     synchronized @NotNull VfsEntrySnapshot.FileEntrySnapshot putFile(
             @NotNull VirtualPath path,
             @NotNull String content

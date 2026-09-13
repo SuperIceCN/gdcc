@@ -23,10 +23,9 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
-/// Installation helper for the editor-addon bootstrap flow (plan §4.5 step B3), plus a manual
-/// `main` entry that installs the compiled client extension **in place** into
-/// `src/editor_addon/addons/gdcc/` so the addon project can be opened in the Godot editor for
-/// manual plugin testing.
+/// Installation helper for the editor-addon bootstrap flow, plus a manual `main` entry that
+/// installs the compiled client extension **in place** into `src/editor_addon/addons/gdcc/`
+/// so the addon project can be opened in the Godot editor for manual plugin testing.
 ///
 /// The built library is named `gdcc_for_editor` (the module id), not after the RPC client:
 /// the addon will accumulate more editor-facing features beyond JSON-RPC. The source's

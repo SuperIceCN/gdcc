@@ -9,7 +9,7 @@
 ## 文档状态
 
 - 状态：事实源维护中
-- 更新时间：2026-04-26
+- 更新时间：2026-09-13
 - 适用范围：
   - `src/main/java/gd/script/gdcc/Main.java`
   - `src/main/java/gd/script/gdcc/cli/**`
@@ -48,7 +48,9 @@
 
 ## 1. 职责与分层
 
-`Main` 只负责委托 `GdccCommand.execute(args)`。命令行解析、host input 准备、API 调用和终端渲染都收敛在
+`Main` 只负责入口路由：首参为 `serve` 时委托 `gd.script.gdcc.rpc.RpcServeCommand`（网络传输属于 RPC
+适配层，见 `doc/module_impl/api/json_rpc_service_implementation.md`，不属于 CLI 范围），其余情况委托
+`GdccCommand.execute(args)`。命令行解析、host input 准备、API 调用和终端渲染都收敛在
 `gd.script.gdcc.cli` 包内；公共 API、frontend、backend 和根包不承载 CLI helper。
 
 CLI 的合法职责是：

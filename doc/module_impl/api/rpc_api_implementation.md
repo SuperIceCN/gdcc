@@ -7,7 +7,7 @@
 ## Document Status
 
 - Status: fact source maintained
-- Updated: 2026-09-06
+- Updated: 2026-09-13
 - Scope:
   - `src/main/java/gd/script/gdcc/api/**`
   - `src/test/java/gd/script/gdcc/api/**`
@@ -711,6 +711,9 @@ Focused API tests currently anchor the contract:
 - output publication: `ApiCompileArtifactLinkTest`, `ApiRecompileArtifactRefreshTest`
 - concurrency and module isolation: `ApiConcurrentMutationTest`, `ApiMultiModuleIsolationTest`
 - generated-file provenance: `ApiCompileDiagnosticsTest`, `CProjectBuilderSharedIncludeTest`
+- RPC adapter over HTTP (`gd.script.gdcc.rpc`): `RpcJsonCodecTest`, `JsonRpcDispatcherTest`,
+  `RpcServerHttpTest`, `RpcApiRoundTripHttpTest`, `RpcCompileHttpIntegrationTest`,
+  `RpcServeCommandTest`, `EditorAddonClientAnalysisTest`, `EditorAddonBootstrapEngineTest`
 
 When extending this API, prefer targeted tests that pin the affected contract instead of broad,
 slow suite runs during iteration.

@@ -18,11 +18,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/// Compile-readiness gate for the editor addon's GDScript JSON-RPC client library (plan §4.4,
-/// step B1). The analysis half proves gdcc can parse, analyze, and lower the real client source
-/// without zig or Godot; the source-level half pins the interop contracts that lowering cannot
-/// see (no coroutines, pending-object API surface, and an un-bypassed frame pump), because a
-/// file with `await` would still lower cleanly yet break the cross-boundary coroutine contract.
+/// Compile-readiness gate for the editor addon's GDScript JSON-RPC client library. The
+/// analysis half proves gdcc can parse, analyze, and lower the real client source without
+/// zig or Godot; the source-level half pins the interop contracts that lowering cannot see
+/// (no coroutines, pending-object API surface, and an un-bypassed frame pump), because a file
+/// with `await` would still lower cleanly yet break the cross-boundary coroutine contract.
 class EditorAddonClientAnalysisTest {
     private static final Path CLIENT_SOURCE_PATH = Path.of("src/editor_addon/addons/gdcc/gdcc_rpc_client.gd3");
     private static final Path PLUGIN_MANIFEST_PATH = Path.of("src/editor_addon/addons/gdcc/plugin.cfg");
@@ -34,7 +34,8 @@ class EditorAddonClientAnalysisTest {
     void clientLibraryAnalyzesAndLowersCleanly() throws IOException {
         var api = new API();
         api.createModule("editor-addon", "Editor Addon Client");
-        // The `.gd3` virtual path is collected directly since step A0; no extension mapping.
+        // The API collects `.gd3` virtual paths directly as compile/analyze sources; no
+        // extension mapping is needed.
         api.putFile("editor-addon", "/src/gdcc_rpc_client.gd3", clientSource());
 
         var result = api.analyze("editor-addon", new AnalyzeOptions(true));
@@ -58,7 +59,7 @@ class EditorAddonClientAnalysisTest {
         assertFalse(AWAIT_PATTERN.matcher(code).find(),
                 "client library must not contain any coroutine (await found in code)");
 
-        // 2) Pending-object API surface (plan §3.3): inner RefCounted class with the
+        // 2) Pending-object API surface: inner RefCounted class with the
         //    self-emitted `completed` signal (pinned verbatim so the emit cannot drift into
         //    another function), the plain-method entry point, and the engine signal handler
         //    with its exactly-typed parameter list (exact-route requirement).
@@ -67,7 +68,7 @@ class EditorAddonClientAnalysisTest {
         assertTrue(code.contains("func _finish(response: Dictionary) -> void:\n        completed.emit(response)"),
                 "_finish must be the self-emission site of the completed signal");
         assertTrue(code.contains("func call_rpc(method: String, params: Dictionary = {}) -> PendingRequest:"),
-                "call_rpc signature drifted from the plan contract");
+                "call_rpc signature drifted from the pending-object contract");
         assertTrue(code.contains("func _on_request_completed("), "_on_request_completed missing");
         for (var parameter : List.of(
                 "result: int", "response_code: int",
@@ -97,9 +98,9 @@ class EditorAddonClientAnalysisTest {
         assertFalse(callRpcBody.contains("_pump_next"), "call_rpc must not pump synchronously");
     }
 
-    /// Parse-level gate for the interpreted plugin scripts (step B2, plan §3.4/§5): editor-only
-    /// APIs (`EditorPlugin`, `EditorInterface`) are not gdcc compile targets, so the automated
-    /// check stops at parsing — analysis would reject the editor API surface by design.
+    /// Parse-level gate for the interpreted plugin scripts: editor-only APIs (`EditorPlugin`,
+    /// `EditorInterface`) are not gdcc compile targets, so the automated check stops at
+    /// parsing — analysis would reject the editor API surface by design.
     @Test
     void pluginScriptsParseCleanly() throws IOException {
         var parserService = new GdScriptParserService();
@@ -118,7 +119,7 @@ class EditorAddonClientAnalysisTest {
         }
     }
 
-    /// File-level acceptance for the plugin manifest (step B2): all five regular fields must be
+    /// File-level acceptance for the plugin manifest: all five regular fields must be
     /// present with non-empty values inside the `[plugin]` section (section-scoped, so a field
     /// stranded in a comment or another section cannot pass), otherwise the editor's plugin
     /// page may not list or enable the addon.
@@ -138,7 +139,7 @@ class EditorAddonClientAnalysisTest {
     /// must occupy its own line so commented-out or trailing text cannot fake the section.
     private static String pluginSection(String manifest) {
         var normalized = manifest.replace("\r\n", "\n");
-        var headerMatcher = Pattern.compile("(?m)^\\[plugin\\]$").matcher(normalized);
+        var headerMatcher = Pattern.compile("(?m)^\\[plugin]$").matcher(normalized);
         assertTrue(headerMatcher.find(), "plugin.cfg must declare a [plugin] section header line");
         var bodyStart = headerMatcher.end();
         var nextSection = normalized.indexOf("\n[", bodyStart);

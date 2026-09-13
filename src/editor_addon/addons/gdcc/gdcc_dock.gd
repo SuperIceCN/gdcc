@@ -7,8 +7,8 @@ extends VBoxContainer
 # Every network wait is a signal `await` on the pending object returned by the client; the dock
 # never blocks the editor main thread. While any request is in flight the dock temporarily
 # disables `OS.low_processor_usage_mode`: the editor enables it by default, and without input
-# or redraws the idle main loop would starve the client's frame pump and HTTPRequest (plan §7
-# risk 7). The previous mode is restored once the last in-flight action finishes.
+# or redraws the idle main loop would starve the client's frame pump and HTTPRequest. The
+# previous mode is restored once the last in-flight action finishes.
 
 var _client: GdccRpcClient
 var _editor_interface: EditorInterface
