@@ -229,11 +229,69 @@ class ApiCompileDiagnosticsTest {
         var result = ApiCompileTestSupport.awaitResult(api, api.compile("demo"));
 
         assertEquals(CompileResult.Outcome.SOURCE_COLLECTION_FAILED, result.outcome());
-        assertEquals("Module 'demo' has no .gd source files to compile", result.failureMessage());
+        assertEquals("Module 'demo' has no .gd/.gd3 source files to compile", result.failureMessage());
         assertTrue(result.sourcePaths().isEmpty());
         assertTrue(result.diagnostics().isEmpty());
         assertTrue(result.outputLinks().isEmpty());
         assertEquals(0, compiler.invocationCount());
+    }
+
+    @Test
+    void compileCollectsGd3SourceFiles(@TempDir Path tempDir) {
+        var compiler = ApiCompileTestSupport.RecordingCompiler.succeeding();
+        var api = ApiCompileTestSupport.newApi(compiler);
+
+        api.createModule("demo", "Gd3 Compile Demo");
+        api.setCompileOptions("demo", ApiCompileTestSupport.compileOptions(tempDir.resolve("gd3-project")));
+        api.putFile("demo", "/src/valid.gd3", validSource("CompileGd3Smoke"));
+
+        var result = ApiCompileTestSupport.awaitResult(api, api.compile("demo"));
+
+        assertEquals(CompileResult.Outcome.SUCCESS, result.outcome());
+        assertTrue(result.success());
+        assertFalse(result.diagnostics().hasErrors());
+        assertEquals(List.of("/src/valid.gd3"), result.sourcePaths());
+        assertEquals(1, compiler.invocationCount());
+    }
+
+    @Test
+    void compileReportsDuplicateDefaultClassNameForSameBasenameGdAndGd3(@TempDir Path tempDir) {
+        var compiler = ApiCompileTestSupport.RecordingCompiler.succeeding();
+        var api = ApiCompileTestSupport.newApi(compiler);
+
+        api.createModule("demo", "Same Basename Compile Demo");
+        api.setCompileOptions("demo", ApiCompileTestSupport.compileOptions(tempDir.resolve("same-basename-project")));
+        // Neither file declares `class_name`, so both derive the default top-level name 'A'.
+        api.putFile("demo", "/src/a.gd", "extends Node\n");
+        api.putFile("demo", "/src/a.gd3", "extends Node\n");
+
+        var result = ApiCompileTestSupport.awaitResult(api, api.compile("demo"));
+
+        // Collection itself must not fail: the duplicate derived name blocks the frontend instead.
+        assertEquals(CompileResult.Outcome.FRONTEND_FAILED, result.outcome());
+        assertEquals(List.of("/src/a.gd", "/src/a.gd3"), result.sourcePaths());
+        assertTrue(result.diagnostics().asList().stream()
+                .anyMatch(diagnostic -> diagnostic.category().equals("sema.class_skeleton")
+                        && diagnostic.message().contains("Duplicate top-level class source name 'A'")));
+        assertEquals(0, compiler.invocationCount());
+    }
+
+    @Test
+    void compileAcceptsSameBasenameGdAndGd3WithDistinctClassNames(@TempDir Path tempDir) {
+        var compiler = ApiCompileTestSupport.RecordingCompiler.succeeding();
+        var api = ApiCompileTestSupport.newApi(compiler);
+
+        api.createModule("demo", "Distinct Names Compile Demo");
+        api.setCompileOptions("demo", ApiCompileTestSupport.compileOptions(tempDir.resolve("distinct-names-project")));
+        api.putFile("demo", "/src/a.gd", validSource("DistinctGdA"));
+        api.putFile("demo", "/src/a.gd3", validSource("DistinctGd3A"));
+
+        var result = ApiCompileTestSupport.awaitResult(api, api.compile("demo"));
+
+        assertEquals(CompileResult.Outcome.SUCCESS, result.outcome());
+        assertFalse(result.diagnostics().hasErrors());
+        assertEquals(List.of("/src/a.gd", "/src/a.gd3"), result.sourcePaths());
+        assertEquals(1, compiler.invocationCount());
     }
 
     @Test

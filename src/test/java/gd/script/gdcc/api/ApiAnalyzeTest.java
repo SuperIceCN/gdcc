@@ -40,10 +40,62 @@ class ApiAnalyzeTest {
 
         assertEquals(AnalysisResult.Outcome.SOURCE_COLLECTION_FAILED, result.outcome());
         assertFalse(result.completed());
-        assertEquals("Module 'demo' has no .gd source files to analyze", result.failureMessage());
+        assertEquals("Module 'demo' has no .gd/.gd3 source files to analyze", result.failureMessage());
         assertTrue(result.sourcePaths().isEmpty());
         assertTrue(result.diagnostics().isEmpty());
         assertEquals(AnalysisResult.LoweringStatus.NOT_REQUESTED, result.loweringStatus());
+    }
+
+    @Test
+    void analyzeCollectsGd3SourceFiles() {
+        var compiler = ApiCompileTestSupport.RecordingCompiler.succeeding();
+        var api = ApiCompileTestSupport.newApi(compiler);
+
+        api.createModule("demo", "Gd3 Demo");
+        api.putFile("demo", "/src/valid.gd3", validSource("AnalyzeGd3Smoke"));
+
+        var result = api.analyze("demo");
+
+        assertEquals(AnalysisResult.Outcome.COMPLETED, result.outcome());
+        assertNull(result.failureMessage());
+        assertFalse(result.hasErrors());
+        assertEquals(List.of("/src/valid.gd3"), result.sourcePaths());
+        assertEquals(0, compiler.invocationCount());
+    }
+
+    @Test
+    void analyzeCollectsSameBasenameGdAndGd3AndReportsDuplicateClassName() {
+        var api = ApiCompileTestSupport.newApi(ApiCompileTestSupport.RecordingCompiler.succeeding());
+
+        api.createModule("demo", "Same Basename Demo");
+        // Neither file declares `class_name`, so both derive the default top-level name 'A'.
+        api.putFile("demo", "/src/a.gd", "extends Node\n");
+        api.putFile("demo", "/src/a.gd3", "extends Node\n");
+
+        var result = api.analyze("demo");
+
+        // Collection itself must not fail: the duplicate derived name is a frontend diagnostic.
+        assertEquals(AnalysisResult.Outcome.COMPLETED, result.outcome());
+        assertEquals(List.of("/src/a.gd", "/src/a.gd3"), result.sourcePaths());
+        assertTrue(result.hasErrors());
+        assertTrue(result.diagnostics().asList().stream()
+                .anyMatch(diagnostic -> diagnostic.category().equals("sema.class_skeleton")
+                        && diagnostic.message().contains("Duplicate top-level class source name 'A'")));
+    }
+
+    @Test
+    void analyzeAcceptsSameBasenameGdAndGd3WithDistinctClassNames() {
+        var api = ApiCompileTestSupport.newApi(ApiCompileTestSupport.RecordingCompiler.succeeding());
+
+        api.createModule("demo", "Distinct Names Demo");
+        api.putFile("demo", "/src/a.gd", validSource("DistinctGdA"));
+        api.putFile("demo", "/src/a.gd3", validSource("DistinctGd3A"));
+
+        var result = api.analyze("demo");
+
+        assertEquals(AnalysisResult.Outcome.COMPLETED, result.outcome());
+        assertFalse(result.hasErrors());
+        assertEquals(List.of("/src/a.gd", "/src/a.gd3"), result.sourcePaths());
     }
 
     @Test

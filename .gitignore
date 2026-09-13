@@ -64,3 +64,4 @@ bin/
 /.codex/
 /.codex
 /test_project/benchmark/
+/src/editor_addon/addons/gdcc/gdcc_for_editor.gdextension

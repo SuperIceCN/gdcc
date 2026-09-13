@@ -78,7 +78,8 @@ final class ModuleState {
         };
     }
 
-    /// `putFile(...)` owns the "mkdir -p parent directories" behavior promised by the RPC plan.
+    /// `putFile(...)` owns the "mkdir -p parent directories" behavior: missing parents are
+    /// created implicitly instead of requiring explicit `createDirectory(...)` calls.
     synchronized @NotNull VfsEntrySnapshot.FileEntrySnapshot putFile(
             @NotNull VirtualPath path,
             @NotNull String content
@@ -468,9 +469,9 @@ final class ModuleState {
         }
     }
 
-    /// Virtual links participate in source discovery, but only surfaced `.gd` files are compile
-    /// sources. Duplicate surfaced aliases of the same backing file are collapsed so one file node
-    /// cannot be compiled twice in a single module pass.
+    /// Virtual links participate in source discovery, but only surfaced `.gd`/`.gd3` files are
+    /// compile sources. Duplicate surfaced aliases of the same backing file are collapsed so one
+    /// file node cannot be compiled twice in a single module pass.
     private void collectCompileSources(
             @NotNull VirtualPath directoryPath,
             @NotNull DirectoryNode directoryNode,
@@ -522,7 +523,7 @@ final class ModuleState {
             @NotNull FileNode fileNode,
             @NotNull IdentityHashMap<FileNode, SourceSnapshot> sourcesByFile
     ) {
-        if (!surfacePath.name().endsWith(".gd")) {
+        if (!isSourceFileName(surfacePath.name())) {
             return;
         }
         var candidate = new SourceSnapshot(
@@ -535,6 +536,13 @@ final class ModuleState {
         if (existing == null || candidate.virtualPath().compareTo(existing.virtualPath()) < 0) {
             sourcesByFile.put(fileNode, candidate);
         }
+    }
+
+    /// Compile sources carry a `.gd` or `.gd3` extension; every other file stays an ordinary
+    /// module file. Same-basename pairs like `a.gd`/`a.gd3` are both collected here — a duplicate
+    /// default class name is diagnosed by the frontend, not by the API layer.
+    private static boolean isSourceFileName(@NotNull String fileName) {
+        return fileName.endsWith(".gd") || fileName.endsWith(".gd3");
     }
 
     private @NotNull String resolveDisplayPath(

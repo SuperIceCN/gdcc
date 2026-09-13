@@ -87,7 +87,7 @@ public final class CompileTaskRunner implements Runnable {
                 throwIfCancellationRequested();
                 taskState.updateRunningStage(
                         CompileTaskSnapshot.Stage.COLLECTING_SOURCES,
-                        "Collecting .gd sources from module VFS",
+                        "Collecting .gd/.gd3 sources from module VFS",
                         0,
                         0,
                         null
@@ -158,7 +158,7 @@ public final class CompileTaskRunner implements Runnable {
                     request.topLevelCanonicalNameMap(),
                     sourcePaths,
                     EMPTY_DIAGNOSTICS,
-                    "Module '" + request.moduleId() + "' has no .gd source files to compile",
+                    "Module '" + request.moduleId() + "' has no .gd/.gd3 source files to compile",
                     "",
                     List.of(),
                     List.of(),

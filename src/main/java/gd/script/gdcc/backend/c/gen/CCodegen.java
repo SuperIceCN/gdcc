@@ -5,6 +5,7 @@ import gd.script.gdcc.backend.CodegenContext;
 import gd.script.gdcc.backend.GeneratedFile;
 import gd.script.gdcc.backend.TemplateLoader;
 import gd.script.gdcc.backend.c.gen.binding.GenerateRenderFacade;
+import gd.script.gdcc.backend.c.gen.binding.GodotBindingSupport;
 import gd.script.gdcc.backend.c.gen.binding.usage.GodotBindingUsageBuffer;
 import gd.script.gdcc.backend.c.gen.binding.usage.GodotBindingUsageSession;
 import gd.script.gdcc.backend.c.gen.fatptr.CObjectFatPtrCollector;
@@ -33,6 +34,7 @@ import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -956,6 +958,12 @@ public class CCodegen implements Codegen {
             var usedEngineMethods = usageSession.engineMethods();
             var usedEngineConstructors = usageSession.engineConstructors();
             var usedModuleLocalBindings = usageSession.moduleLocalBindings();
+            // Header guards must be real C identifiers: display-oriented module names may contain
+            // spaces or punctuation, which would otherwise collide every generated header behind
+            // the same first `#ifndef` identifier and silently suppress their contents.
+            var headerGuardPrefix = GodotBindingSupport.cIdentifier(
+                    "GDEXTENSION_" + module.getModuleName().toUpperCase(Locale.ROOT)
+            );
             var objectFatPtrSpecs = CObjectFatPtrCollector.collect(
                     module,
                     ctx.classRegistry(),
@@ -966,6 +974,7 @@ public class CCodegen implements Codegen {
             var bindTplCtx = Map.of(
                     "module", module,
                     "helper", helper,
+                    "headerGuardPrefix", headerGuardPrefix,
                     "usedEngineMethods", usedEngineMethods,
                     "usedEngineConstructors", usedEngineConstructors,
                     "usedModuleLocalBindings", usedModuleLocalBindings
@@ -977,6 +986,7 @@ public class CCodegen implements Codegen {
             var objectFatPtrTypesTplCtx = Map.of(
                     "module", module,
                     "helper", helper,
+                    "headerGuardPrefix", headerGuardPrefix,
                     "objectFatPtrSpecs", objectFatPtrSpecs
             );
             var objectFatPtrTypesSrc = TemplateLoader.renderFromClasspath(
@@ -986,6 +996,7 @@ public class CCodegen implements Codegen {
             var hTplCtx = Map.of(
                     "module", module,
                     "helper", helper,
+                    "headerGuardPrefix", headerGuardPrefix,
                     "inheritanceOrderedClassDefs", inheritanceOrderedClassDefs
             );
             var hSrc = TemplateLoader.renderFromClasspath("template_451/entry.h.ftl", hTplCtx);

@@ -3,8 +3,9 @@
 <#-- @ftlvariable name="usedEngineMethods" type="java.util.List<gd.script.gdcc.backend.c.gen.insn.BackendMethodCallResolver.ResolvedMethodCall>" -->
 <#-- @ftlvariable name="usedEngineConstructors" type="java.util.List<gd.script.gdcc.backend.c.gen.binding.usage.EngineConstructorUsage>" -->
 <#-- @ftlvariable name="usedModuleLocalBindings" type="java.util.List<gd.script.gdcc.backend.c.gen.binding.ModuleLocalGodotBinding>" -->
-#ifndef GDEXTENSION_${module.moduleName?upper_case}_ENGINE_METHOD_BINDS_H
-#define GDEXTENSION_${module.moduleName?upper_case}_ENGINE_METHOD_BINDS_H
+<#-- @ftlvariable name="headerGuardPrefix" type="java.lang.String" -->
+#ifndef ${headerGuardPrefix}_ENGINE_METHOD_BINDS_H
+#define ${headerGuardPrefix}_ENGINE_METHOD_BINDS_H
 
 // Engine constructor wrappers used by this module.
 <#if usedEngineConstructors?size == 0>
@@ -363,4 +364,4 @@ cleanup:
 
 </#list>
 </#if>
-#endif // GDEXTENSION_${module.moduleName?upper_case}_ENGINE_METHOD_BINDS_H
+#endif // ${headerGuardPrefix}_ENGINE_METHOD_BINDS_H

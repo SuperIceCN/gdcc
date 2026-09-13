@@ -135,6 +135,18 @@ public final class CompileTaskState {
         }
     }
 
+    /// Waits (bounded) for the runner thread to die after cancellation was requested. Returns
+    /// `true` when no live runner remains — including the never-attached case — so close paths can
+    /// tell a clean shutdown from a leftover thread. `Duration.ZERO` never blocks: it just reports
+    /// whether the runner is still alive.
+    public boolean awaitRunner(@NotNull Duration timeout) throws InterruptedException {
+        var thread = runnerThread;
+        if (thread == null) {
+            return true;
+        }
+        return thread.join(timeout);
+    }
+
     public boolean expiredAt(@NotNull Instant now, @NotNull Duration ttl) {
         Objects.requireNonNull(now, "now must not be null");
         Objects.requireNonNull(ttl, "ttl must not be null");

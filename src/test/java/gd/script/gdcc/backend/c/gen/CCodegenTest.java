@@ -215,6 +215,31 @@ public class CCodegenTest {
     }
 
     @Test
+    public void generatesValidHeaderGuardsForModuleNamesWithSpaces() throws Exception {
+        // Display-oriented module names may contain spaces/punctuation; the include guards must be
+        // sanitized C identifiers, otherwise every generated header shares the same first #ifndef
+        // identifier and later headers are silently skipped by the preprocessor.
+        var workerClass = new LirClassDef("Worker", "RefCounted");
+        var module = new LirModule("Compile Demo", List.of(workerClass));
+
+        var classRegistry = new ClassRegistry(ExtensionApiLoader.loadDefault());
+        ProjectInfo projectInfo = new ProjectInfo("test", GodotVersion.V451, Path.of(".")) {
+        };
+        var codegen = new CCodegen();
+        codegen.prepare(new CodegenContext(projectInfo, classRegistry), module);
+        List<GeneratedFile> files = codegen.generate();
+
+        var bindHeaderCode = generatedFileText(files, "engine_method_binds.h");
+        var fatPtrHeaderCode = generatedFileText(files, "object_fat_ptr_types.h");
+        var hCode = generatedFileText(files, "entry.h");
+        assertTrue(bindHeaderCode.contains("#ifndef GDEXTENSION_COMPILE_DEMO_ENGINE_METHOD_BINDS_H"));
+        assertTrue(fatPtrHeaderCode.contains("#ifndef GDEXTENSION_COMPILE_DEMO_OBJECT_FAT_PTR_TYPES_H"));
+        assertTrue(hCode.contains("#ifndef GDEXTENSION_COMPILE_DEMO_ENTRY_H"));
+        // The spaced raw form must not survive anywhere in the guards.
+        assertFalse(hCode.contains("#ifndef GDEXTENSION_COMPILE DEMO_ENTRY_H"));
+    }
+
+    @Test
     public void generateShouldRejectCompilerOnlyTypeOnHiddenFunctionReturnBeforeBackendSynthesis() {
         var workerClass = new LirClassDef("Worker", "RefCounted");
         var helper = new LirFunctionDef("helper");

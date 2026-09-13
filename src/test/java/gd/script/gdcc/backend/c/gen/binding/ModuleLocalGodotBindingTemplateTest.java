@@ -126,6 +126,7 @@ class ModuleLocalGodotBindingTemplateTest {
                 "template_451/engine_method_binds.h.ftl",
                 Map.of(
                         "module", new LirModule("module_local_template_test", List.of()),
+                        "headerGuardPrefix", "GDEXTENSION_MODULE_LOCAL_TEMPLATE_TEST",
                         "usedEngineMethods", List.of(),
                         "usedEngineConstructors", usedEngineConstructors,
                         "usedModuleLocalBindings", usedModuleLocalBindings

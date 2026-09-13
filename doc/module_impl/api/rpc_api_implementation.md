@@ -7,7 +7,7 @@
 ## Document Status
 
 - Status: fact source maintained
-- Updated: 2026-09-06
+- Updated: 2026-09-13
 - Scope:
   - `src/main/java/gd/script/gdcc/api/**`
   - `src/test/java/gd/script/gdcc/api/**`
@@ -198,6 +198,33 @@ The analysis result surface is deliberately independent from the compile surface
 and `AnalyzeOptions` are separate DTOs and must not reuse `CompileResult`, compile task snapshots,
 or compile outcomes.
 
+### 3.7 API Instance Lifecycle
+
+`API` implements `AutoCloseable`. `close()` is the SIGINT-style teardown entrypoint and is
+idempotent. In order, it:
+
+1. Stops the TTL cleaner permanently (the sweep thread is interrupted and later `ensureRunning()`
+   calls become no-ops, so the cleaner cannot resurrect on a non-empty task table).
+2. Requests cancellation for every unfinished compile task, serialized against `compile(...)`
+   admission: a task is either fully registered before the sweep (and is then canceled by it) or
+   the compile call fails because the instance is already closed. Queued tasks complete as
+   `CANCELED` synchronously (last-result writeback included); running tasks are interrupted —
+   their runners notice the cancellation flag, finish as `CANCELED` through the normal runner
+   completion path, and release the module gate exactly like an explicit `cancelCompileTask(...)`.
+3. Joins runner threads with a bounded total budget; tasks still alive after the budget are logged
+   as a warning instead of blocking shutdown forever. Native subprocesses respond to interruption
+   by being destroyed, so runners are expected to die promptly.
+
+After `close()` returns, the instance rejects new work: state-mutating methods (`createModule`,
+`deleteModule`, all VFS writes/links/deletes, `setCompileOptions`, `setTopLevelCanonicalNameMap`,
+`analyze(...)`, `compile(...)`, `cancelCompileTask(...)`, `clearCompileTaskEvents(...)`) throw
+`IllegalStateException`. Read-only queries (`getModule`, `listModules`, `readFile`,
+`listDirectory`, `readEntry`, `getCompileOptions`, `getTopLevelCanonicalNameMap`,
+`getLastCompileResult`, `getCompileTask`, `getLatestCompileTaskEvent`, `listCompileTaskEvents`)
+keep serving the final snapshots so teardown outcomes stay inspectable. Adapters mapping
+`IllegalStateException` from a closing instance treat it as an internal error, which is acceptable
+because the transport is already shutting down.
+
 ---
 
 ## 4. Data Model
@@ -362,7 +389,7 @@ Current outcomes:
 - `COMPLETED`: the parse/analyze pipeline (and lowering, when requested) ran to completion.
   Diagnostics may still contain errors; `COMPLETED` describes the pipeline, not code health.
 - `SOURCE_COLLECTION_FAILED`: module VFS source collection failed before parsing, for example on
-  broken or cyclic virtual links, or the module has no `.gd` sources.
+  broken or cyclic virtual links, or the module has no `.gd`/`.gd3` sources.
 - `INTERNAL_FAILED`: required compiler metadata such as the Godot extension API could not be
   loaded.
 
@@ -440,7 +467,7 @@ One compile task performs:
 
 1. Wait for same-module gate.
 2. Freeze compile options, class-name map, and VFS source snapshots.
-3. Collect `.gd` files from the whole module VFS.
+3. Collect `.gd`/`.gd3` files from the whole module VFS.
 4. Ignore `LOCAL` links during source collection.
 5. Parse each source with `GdScriptParserService.parseUnit(...)`.
 6. Construct `FrontendModule(moduleName, units, topLevelCanonicalNameMap)`.
@@ -457,9 +484,9 @@ One compile task performs:
 If parser or frontend diagnostics contain errors, compilation stops before native build and returns
 `FRONTEND_FAILED`.
 
-Non-`.gd` VFS files remain ordinary module files and are not compile sources. Adapters that expose a
-source-file input contract, such as the CLI `files` argument, must reject non-`.gd` host inputs at
-their own boundary before writing them into the module VFS.
+Non-`.gd`/`.gd3` VFS files remain ordinary module files and are not compile sources. Adapters that
+expose a source-file input contract, such as the CLI `files` argument, must reject non-`.gd` host
+inputs at their own boundary before writing them into the module VFS.
 
 If `projectPath` is missing or cannot be created as a directory, compilation returns
 `CONFIGURATION_FAILED`.
@@ -483,7 +510,7 @@ One analysis request performs:
 
 1. Freeze compile options, class-name map, and VFS source snapshots through the same module-state
    freeze used by compile tasks.
-2. Collect `.gd` files from the whole module VFS, with identical link and dedup rules.
+2. Collect `.gd`/`.gd3` files from the whole module VFS, with identical link and dedup rules.
 3. Parse each source with `GdScriptParserService.parseUnit(...)`.
 4. Stop after parsing when parse diagnostics contain errors, because semantic phases require a
    well-formed AST.
@@ -523,6 +550,9 @@ Per module:
   publication are complete.
 - A second compile request for the same module fails while a queued or active compile exists.
 - Deleting a module fails while a compile task is queued or active.
+- `compile(...)` admission is serialized against `close()`: a compile call either registers its
+  task before the close sweep (and gets canceled by it) or fails on the closed instance; no runner
+  thread can leak between the sweep and the cancellation requests.
 
 Across modules:
 
@@ -677,9 +707,13 @@ Focused API tests currently anchor the contract:
 - task lifecycle, progress, events, retention: `ApiCompileTaskTest`,
   `ApiCompileTaskProgressTest`, `ApiCompileTaskFailureStageTest`, `ApiCompileTaskEventTest`,
   `ApiCompileTaskTtlTest`
+- task cancellation and instance lifecycle: `ApiCompileTaskCancellationTest`, `ApiCloseTest`
 - output publication: `ApiCompileArtifactLinkTest`, `ApiRecompileArtifactRefreshTest`
 - concurrency and module isolation: `ApiConcurrentMutationTest`, `ApiMultiModuleIsolationTest`
 - generated-file provenance: `ApiCompileDiagnosticsTest`, `CProjectBuilderSharedIncludeTest`
+- RPC adapter over HTTP (`gd.script.gdcc.rpc`): `RpcJsonCodecTest`, `JsonRpcDispatcherTest`,
+  `RpcServerHttpTest`, `RpcApiRoundTripHttpTest`, `RpcCompileHttpIntegrationTest`,
+  `RpcServeCommandTest`, `EditorAddonClientAnalysisTest`, `EditorAddonBootstrapEngineTest`
 
 When extending this API, prefer targeted tests that pin the affected contract instead of broad,
 slow suite runs during iteration.
